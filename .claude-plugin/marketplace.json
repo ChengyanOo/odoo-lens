@@ -1,0 +1,15 @@
+{
+  "name": "odoo-lens",
+  "owner": {
+    "name": "yan"
+  },
+  "description": "Marketplace for the odoo-lens Claude Code plugin",
+  "plugins": [
+    {
+      "name": "odoo-lens",
+      "source": "./",
+      "description": "Odoo 16.0-20.0 code intelligence for Claude Code: language server, module linter and skill",
+      "version": "0.1.0"
+    }
+  ]
+}

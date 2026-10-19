@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="x_sale_ext.XOrderWidget">
+        <div class="o_x_order_widget"><t t-esc="props.value"/></div>
+    </t>
+    <t t-name="x_sale_ext.XFormView" t-inherit="web.FormView" t-inherit-mode="extension">
+        <xpath expr="//div" position="inside"><span/></xpath>
+    </t>
+</templates>

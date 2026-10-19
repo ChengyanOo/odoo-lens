@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="group_user" model="res.groups">
+        <field name="name">Internal User</field>
+    </record>
+    <record id="group_system" model="res.groups">
+        <field name="name">Settings</field>
+    </record>
+</odoo>

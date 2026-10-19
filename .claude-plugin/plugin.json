@@ -1,0 +1,17 @@
+{
+  "name": "odoo-lens",
+  "displayName": "Odoo Lens",
+  "version": "0.1.0",
+  "description": "Odoo 16.0-20.0 code intelligence for Claude Code: a fast, dependency-free language server (models, fields, methods, inheritance and override order, XML ids, views, QWeb) across Python, XML, CSV and JS, plus a module linter.",
+  "author": {
+    "name": "yan"
+  },
+  "keywords": [
+    "odoo",
+    "lsp",
+    "language-server",
+    "linter",
+    "python",
+    "xml"
+  ]
+}

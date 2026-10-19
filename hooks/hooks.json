@@ -1,0 +1,17 @@
+{
+  "description": "Tell Claude at session start that odoo-lens covers the project (only when it holds Odoo code)",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/odoo-lens\" session-hint",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

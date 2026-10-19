@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# odoo-lens launcher: runs the (stdlib-only) server with the first Python >= 3.12 found
+# (Odoo saas-19.1+ sources need the 3.12 parser), falling back to >= 3.10.
+# Claude Code may be started from a GUI with a minimal PATH, so well-known install
+# locations are probed too. Override with ODOO_LENS_PYTHON=/path/to/python3.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+candidates=("${ODOO_LENS_PYTHON:-}")
+for v in 3.12 3.13 3.14 3.15; do
+  candidates+=("python$v" "/opt/homebrew/bin/python$v" "/usr/local/bin/python$v" "$HOME/.local/bin/python$v" "$HOME/.pyenv/shims/python$v" "/usr/bin/python$v")
+done
+candidates+=(python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 python3.11 python3.10 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10 /usr/bin/python3)
+min=12
+for pass in 1 2; do
+  for py in "${candidates[@]}"; do
+    [ -n "$py" ] || continue
+    command -v "$py" >/dev/null 2>&1 || continue
+    if "$py" -c "import sys; sys.exit(sys.version_info < (3, $min))" 2>/dev/null; then
+      # -I: isolated mode, so a workspace's odoo/ package or a stray json.py can never shadow our imports
+      exec "$py" -I "$root/odoo_lens_main.py" "$@"
+    fi
+  done
+  min=10
+done
+echo "odoo-lens: no Python >= 3.10 found (set ODOO_LENS_PYTHON)" >&2
+exit 1

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form" model="ir.ui.view">
+        <field name="name">sale.order.form</field>
+        <field name="model">sale.order</field>
+        <field name="arch" type="xml">
+            <form string="Sales Order">
+                <header>
+                    <button name="action_confirm" type="object" string="Confirm" invisible="state != 'draft'"/>
+                </header>
+                <field name="partner_id"/>
+                <field name="date_order"/>
+                <field name="order_line">
+                    <list editable="bottom">
+                        <field name="product_id"/>
+                        <field name="price_subtotal"/>
+                    </list>
+                </field>
+                <field name="amount_total"/>
+            </form>
+        </field>
+    </record>
+    <record id="action_orders" model="ir.actions.act_window">
+        <field name="name">Sales Orders</field>
+        <field name="res_model">sale.order</field>
+        <field name="context">{'default_company_id': ref('base.main_company')}</field>
+    </record>
+    <menuitem id="sale_menu_root" name="Sales" groups="base.group_user"/>
+    <menuitem id="menu_sale_order" name="Orders" parent="sale_menu_root" action="action_orders"/>
+</odoo>

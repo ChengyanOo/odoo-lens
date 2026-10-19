@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form_x" model="ir.ui.view">
+        <field name="name">sale.order.form.x</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <field name="partner_id" position="after">
+                <field name="x_reference"/>
+            </field>
+        </field>
+    </record>
+    <record id="view_x_sale_note_list" model="ir.ui.view">
+        <field name="name">x.sale.note.list</field>
+        <field name="model">x.sale.note</field>
+        <field name="arch" type="xml">
+            <!-- notes -->
+            <list>
+                <field name="order_id"/>
+                <field name="body"/>
+            </list>
+        </field>
+    </record>
+    <record id="action_x_sale_notes" model="ir.actions.act_window">
+        <field name="name">Order Notes</field>
+        <field name="res_model">x.sale.note</field>
+    </record>
+    <menuitem id="menu_x_root" name="X Sales">
+        <menuitem id="menu_x_notes" name="Order Notes" action="action_x_sale_notes"/>
+    </menuitem>
+    <template id="cart" name="X Cart">
+        <div class="x-cart"><t t-out="order.name"/></div>
+    </template>
+    <template id="cart_inherit" inherit_id="x_sale_ext.cart">
+        <xpath expr="//div" position="inside"><span>extra</span></xpath>
+    </template>
+    <data noupdate="1">
+        <record id="note_demo" model="x.sale.note">
+            <field name="body">Hello</field>
+        </record>
+    </data>
+</odoo>

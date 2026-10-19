@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_partner_form" model="ir.ui.view">
+        <field name="name">res.partner.form</field>
+        <field name="model">res.partner</field>
+        <field name="arch" type="xml">
+            <form string="Partners">
+                <field name="name"/>
+                <field name="parent_id" invisible="is_company"/>
+                <field name="child_ids">
+                    <list>
+                        <field name="name"/>
+                        <field name="email"/>
+                    </list>
+                </field>
+                <field name="country_id" groups="base.group_user"/>
+            </form>
+        </field>
+    </record>
+    <record id="action_partner_form" model="ir.actions.act_window">
+        <field name="name">Customers</field>
+        <field name="res_model">res.partner</field>
+        <field name="view_id" ref="view_partner_form"/>
+    </record>
+    <menuitem id="menu_contacts" name="Contacts" action="action_partner_form" sequence="4"/>
+</odoo>

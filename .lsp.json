@@ -1,0 +1,14 @@
+{
+  "odoo": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/bin/odoo-lens",
+    "extensionToLanguage": {
+      ".py": "python",
+      ".xml": "xml",
+      ".csv": "csv",
+      ".js": "javascript"
+    },
+    "workspaceFolder": "${CLAUDE_PROJECT_DIR}",
+    "startupTimeout": 20000,
+    "maxRestarts": 5
+  }
+}
