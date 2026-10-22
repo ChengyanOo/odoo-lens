@@ -14,12 +14,16 @@ import ast
 import re
 import sys
 import warnings
-from bisect import bisect_right
 
 from ..facts import (
     CLASSES,
     ERROR,
+    F_END_COL,
+    F_LINE,
     IMPORTS,
+    K_FIELDS,
+    K_MODEL,
+    K_NAME,
     KIND,
     KIND_PY,
     MI_ATTRS,
@@ -35,6 +39,7 @@ from ..facts import (
     REFS,
     SYMBOLS,
 )
+from .common import SrcIndex
 
 # Positional parameters of field constructors (after normalization to keywords).
 POSITIONAL = {
@@ -58,40 +63,15 @@ MODEL_BASES = {
 FRAMEWORK_CLASSES = frozenset({"BaseModel", "AbstractModel", "Model", "TransientModel", "CachedModel"})
 # literal model attributes whose value names fields of the model itself
 FIELD_NAME_ATTRS = ("_rec_name", "_parent_name", "_fold_name", "_active_name", "_date_name", "_rec_names_search")
-METHOD_KWARGS = ("compute", "inverse", "search", "group_expand")
+METHOD_KWARGS = ("compute", "inverse", "search", "group_expand", "compute_sql")
 DEC_FIELD_ROLES = {"depends": "depends", "onchange": "onchange", "constrains": "constrains"}
 MAX_TEXT = 120
 
 
-class _Src:
-    """Source helper: byte lines, newline offsets, UTF-16 column conversion."""
+class _Src(SrcIndex):
+    """Source helper: :class:`SrcIndex` plus AST node text and string spans."""
 
-    __slots__ = ("src", "lines", "ascii", "_nl")
-
-    def __init__(self, src: bytes):
-        self.src = src
-        self.lines = src.split(b"\n")
-        self.ascii = src.isascii()
-        self._nl: list[int] | None = None
-
-    def col(self, line0: int, bcol: int) -> int:
-        if self.ascii or bcol <= 0:
-            return bcol
-        try:
-            b = self.lines[line0]
-        except IndexError:
-            return bcol
-        if b.isascii():
-            return bcol
-        return len(b[:bcol].decode("utf-8", "replace").encode("utf-16-le")) // 2
-
-    def pos(self, offset: int) -> tuple[int, int]:
-        """Byte offset in the file -> (line0, byte col)."""
-        if self._nl is None:
-            self._nl = [m.start() for m in re.finditer(b"\n", self.src)]
-        line = bisect_right(self._nl, offset - 1)
-        start = self._nl[line - 1] + 1 if line > 0 else 0
-        return line, offset - start
+    __slots__ = ()
 
     def segment(self, node: ast.AST, limit: int = MAX_TEXT) -> str:
         l0 = node.lineno - 1  # type: ignore[attr-defined]
@@ -269,7 +249,7 @@ class _Extractor:
                 ftype = self.field_type(node.value)
                 if ftype is not None:
                     values[node.targets[0].id] = (node, node.value, ftype)  # type: ignore[assignment]
-        index = {c[0]: i for i, c in enumerate(self.classes)}
+        index = {c[K_NAME]: i for i, c in enumerate(self.classes)}
         for node in body:
             call = node.value if isinstance(node, ast.Expr) else None
             if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "setattr" and len(call.args) == 3):
@@ -278,15 +258,15 @@ class _Extractor:
             if not (isinstance(cls_node, ast.Name) and isinstance(key, ast.Constant) and isinstance(key.value, str) and isinstance(val, ast.Name)):
                 continue
             i = index.get(cls_node.id)
-            if i is None or val.id not in values or not self.classes[i][6]:
+            if i is None or val.id not in values or not self.classes[i][K_MODEL]:
                 continue
             stmt, fcall, ftype = values[val.id]
             cls = self.classes[i]
-            model = cls[6].get(MI_NAME) or (cls[6].get(MI_INHERIT) or [None])[0]
+            model = cls[K_MODEL].get(MI_NAME) or (cls[K_MODEL].get(MI_INHERIT) or [None])[0]
             field = self.field(key, stmt, fcall, ftype, model)
             l0, c0, c1 = self.node_pos(stmt.targets[0])  # type: ignore[attr-defined]  # the field's own statement
-            field = (field[0], l0, c0, c1) + field[4:]
-            self.classes[i] = cls[:7] + (cls[7] + [field],) + cls[8:]
+            field = field[:F_LINE] + (l0, c0, c1) + field[F_END_COL + 1 :]
+            self.classes[i] = cls[:K_FIELDS] + (cls[K_FIELDS] + [field],) + cls[K_FIELDS + 1 :]
 
     def module_body(self, body: list[ast.stmt], top: bool) -> None:
         for node in body:

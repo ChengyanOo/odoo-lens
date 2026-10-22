@@ -21,7 +21,7 @@ sets ``ERROR``.
 from __future__ import annotations
 
 # Bump whenever the layout of any tuple below changes (invalidates caches).
-FACTS_VERSION = 11
+FACTS_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # Common keys of a file-facts dict

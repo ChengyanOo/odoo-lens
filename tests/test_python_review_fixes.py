@@ -11,15 +11,19 @@ from __future__ import annotations
 import ast
 import gc
 import os
+import sys
 import unittest
 
-from odoo_lens import features
-from odoo_lens.analysis import python as pa
-from odoo_lens.analysis.targets import ATTR, FIELD, METHOD, PYSYM
-from odoo_lens.cli import headless_server, load_env
-from odoo_lens.documents import path_to_uri
-from odoo_lens.extract.pyfacts import extract, parse_tolerant
-from odoo_lens.server import RequestContext
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from odoo_lens import features  # noqa: E402
+from odoo_lens.analysis import python as pa  # noqa: E402
+from odoo_lens.analysis.targets import ATTR, FIELD, METHOD, PYSYM  # noqa: E402
+from odoo_lens.cli import headless_server, load_env  # noqa: E402
+from odoo_lens.documents import path_to_uri  # noqa: E402
+from odoo_lens.extract.pyfacts import extract, parse_tolerant  # noqa: E402
+from odoo_lens.server import RequestContext  # noqa: E402
 
 WORKTREES = os.path.expanduser(os.environ.get("ODOO_LENS_WORKTREES", "~/odev/worktrees"))
 

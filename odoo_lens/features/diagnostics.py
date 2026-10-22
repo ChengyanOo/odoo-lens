@@ -17,12 +17,13 @@ Claude Code shows only the file basename and at most 10 diagnostics per file,
 so every message is one self-explanatory line naming the model / module.
 
 Codes: ``syntax-error``, ``unknown-model``, ``unknown-field``,
-``unknown-method``, ``unknown-xmlid``, ``missing-dependency``,
-``unknown-module``, ``missing-file``, ``invalid-default``, ``deprecated``,
-``deprecated-attrs``, ``deprecated-tree``, ``not-imported`` (a Python file
-defining models that no import reaches), ``not-loaded`` (a data file whose
-manifest entry is commented out). Data files the manifest does not load are
-not checked otherwise: Odoo never reads them.
+``unknown-method``, ``private-method`` (a ``_``-prefixed button method),
+``unknown-xmlid``, ``missing-dependency``, ``unknown-module``,
+``missing-file``, ``invalid-default``, ``deprecated``, ``deprecated-attrs``,
+``deprecated-tree``, ``unknown-view-type`` (``<list>`` before Odoo 18.0),
+``not-imported`` (a Python file defining models that no import reaches),
+``not-loaded`` (a data file whose manifest entry is commented out). Data files
+the manifest does not load are not checked otherwise: Odoo never reads them.
 """
 
 from __future__ import annotations
@@ -36,19 +37,27 @@ from typing import Any, Iterable
 from ..documents import utf16_len, utf16_to_index
 from ..extract.common import SrcIndex
 from ..facts import (
+    A_COL,
+    A_END_COL,
     A_KIND,
     A_LINE,
+    A_NAME,
+    A_VALUE,
     CLASSES,
     CSV_MODEL,
     ERROR,
     F_ARGS,
+    F_COL,
     F_COMODEL,
+    F_END_COL,
     F_END_LINE,
     F_LINE,
     F_NAME,
     F_TYPE,
     K_ATTRS,
     K_BASES,
+    K_COL,
+    K_END_COL,
     K_END_LINE,
     K_FIELDS,
     K_LINE,
@@ -57,7 +66,10 @@ from ..facts import (
     MANIFEST_DATA,
     MANIFEST_DEMO,
     MANIFEST_DEPENDS,
+    M_COL,
     M_DECORATORS,
+    M_END_COL,
+    M_END_LINE,
     M_LINE,
     M_NAME,
     MI_INHERIT,
@@ -66,8 +78,11 @@ from ..facts import (
     MI_ATTRS,
     MI_KIND,
     MI_NAME,
+    R_COL,
     R_CTX,
+    R_END_COL,
     R_KIND,
+    R_LINE,
     R_VALUE,
     RECORDS,
     REF_FIELD,
@@ -76,10 +91,16 @@ from ..facts import (
     REF_XMLID,
     REFS,
     ROOT,
+    S_END_LINE,
+    S_KIND,
+    S_LINE,
     SYMBOLS,
+    X_END_LINE,
     X_ID,
     X_INFO,
+    X_LINE,
     X_MODEL,
+    X_TAG,
 )
 from ..registry import LOG_ACCESS_FIELDS, UNLOADED_DIRS, model_class_info
 
@@ -122,7 +143,7 @@ PY_FIELD_ROLES = {
     "_rec_names_search": (ERROR_, "_rec_names_search"),
     "domain": (WARNING, "domain"),
 }
-PY_METHOD_ROLES = frozenset({"compute", "inverse", "search", "group_expand", "selection", "default"})
+PY_METHOD_ROLES = frozenset({"compute", "inverse", "search", "group_expand", "compute_sql", "selection", "default"})
 # resolved on concrete models only: an abstract mixin may name members that its
 # inheritors define (registry._field_triggers skips abstract models)
 LATE_BOUND_ROLES = frozenset({"depends", "constrains", "onchange", "_order", "_rec_names_search"}) | PY_METHOD_ROLES
@@ -234,7 +255,7 @@ def _not_imported(ctx: Any, facts: dict, report: "_Report") -> bool:
         how = f"add 'from . import {name}' to {pkg}/__init__.py"
     msg = f"This file is not imported by module '{ctx.module}' ({how}): Odoo never loads the models defined here"
     first = models[0]
-    report.add(WARNING, "not-imported", first[1], first[2], first[3], msg)
+    report.add(WARNING, "not-imported", first[K_LINE], first[K_COL], first[K_END_COL], msg)
     return True
 
 
@@ -381,7 +402,7 @@ def _misattributed(cls: Any) -> bool:
     """A class whose ``_name`` was set by a chained assignment (``_name =
     _description = 'x'``): the extractor misses it, so the registry files it
     under its ``_inherit`` parent instead of under model 'x'."""
-    return not cls.model_info.get(MI_NAME) and any(a[0] == "_name" for a in cls.facts[K_ATTRS])
+    return not cls.model_info.get(MI_NAME) and any(a[A_NAME] == "_name" for a in cls.facts[K_ATTRS])
 
 
 def _registry_cache(reg: Any) -> dict:
@@ -522,7 +543,7 @@ class _Resolver:
                 for cls in facts.get(CLASSES) or ():
                     if cls[K_MODEL] is None or not cls[K_MODEL].get(MI_NAME):
                         for a in cls[K_ATTRS]:
-                            m = _QUOTED_NAME_RE.match(a[5]) if a[0] == "_name" else None
+                            m = _QUOTED_NAME_RE.match(a[A_VALUE]) if a[A_NAME] == "_name" else None
                             if m:
                                 hit.add(m.group(1))
             self.cache["unextracted_models"] = hit
@@ -626,9 +647,9 @@ class _Resolver:
             hit = {}
             for c in self._union(model, scope, which == K_FIELDS):
                 for member in c.facts[which]:
-                    prev = hit.get(member[0])
+                    prev = hit.get(member[F_NAME])
                     if prev is None or (which == K_FIELDS and not prev[F_COMODEL] and member[F_COMODEL]):
-                        hit[member[0]] = member
+                        hit[member[F_NAME]] = member
             if which == K_FIELDS:
                 if not self.since((19, 0)):  # 16-18 create the _inherits many2one automatically
                     for parent, link in self.reg.model_inherits(model, scope).items():
@@ -659,7 +680,7 @@ class _Resolver:
         """A class of ``model`` (or of its parents) declares ``name`` itself
         (``module``: a class of that module), delegation excluded."""
         classes = self._union(model, self.scope if module is None else None, False)
-        return any((module is None or c.module == module) and any(m[0] == name for m in c.facts[which]) for c in classes)
+        return any((module is None or c.module == module) and any(m[F_NAME] == name for m in c.facts[which]) for c in classes)
 
     def field_status(self, model: str, name: str, runtime: bool = False) -> tuple[str, list[str], tuple | None]:
         """('ok' | 'unknown' | 'outside', modules providing it, a definition)."""
@@ -695,7 +716,7 @@ class _Resolver:
         for c in self._union(model, None, which == K_FIELDS):
             if c.module is None or c.module in self.scope:
                 continue
-            if any(m[0] == name for m in c.facts[which]) or any(name in self.members(p, which, None) for p in c.parents()):
+            if any(m[F_NAME] == name for m in c.facts[which]) or any(name in self.members(p, which, None) for p in c.parents()):
                 out.append(c.module)
         return _unique(out)
 
@@ -805,7 +826,7 @@ class _Resolver:
                         rel = os.path.relpath(path, root) if root else path
                         for idx in (K_FIELDS, K_METHODS):
                             for item in c[idx]:
-                                hit.setdefault((owner, idx, item[0]), (rel, item[1] + 1))
+                                hit.setdefault((owner, idx, item[F_NAME]), (rel, item[F_LINE] + 1))
             self.cache["unimported_members"] = hit
         found = hit.get((model, index, name))
         if not found:
@@ -1174,7 +1195,7 @@ class _PythonChecker:
         for ref in self.facts.get(REFS) or ():
             kind = ref[R_KIND]
             role = ref[R_CTX][0]
-            if kind in (REF_MODEL, REF_XMLID) and role in ("env", "res_model", "ref", "groups") and self._inert(ref[2], ref[3]):
+            if kind in (REF_MODEL, REF_XMLID) and role in ("env", "res_model", "ref", "groups") and self._inert(ref[R_LINE], ref[R_COL]):
                 continue
             if kind == REF_MODEL:
                 self._model_ref(ref, role)
@@ -1191,12 +1212,12 @@ class _PythonChecker:
         model = ref[R_VALUE]
         if model in self.local_models or role == "_name":
             return
-        pos = (ref[2], ref[3], ref[4])
+        pos = (ref[R_LINE], ref[R_COL], ref[R_END_COL])
         if role in ("_inherit", "_inherits"):
             _report_model(self.report, self.res, model, pos, ERROR_, role, inherit=True)
         elif role == "comodel":
-            cls = self.class_at(ref[2])
-            field = self._field_def(cls, ref[2]) if cls is not None else None
+            cls = self.class_at(ref[R_LINE])
+            field = self._field_def(cls, ref[R_LINE]) if cls is not None else None
             if field is not None and "related" in (field[F_ARGS] or {}):
                 return  # a related field takes its comodel from the target field
             name = field[F_NAME] if field is not None else None
@@ -1204,7 +1225,7 @@ class _PythonChecker:
         elif role == "env" or role == "res_model":
             status = self.res.model_status(model, runtime=True)[0]
             # a res_model string is only data until the client opens it
-            if (status == "unknown" or (status == "outside" and role == "env")) and not self._guarded(model, ref[2]):
+            if (status == "unknown" or (status == "outside" and role == "env")) and not self._guarded(model, ref[R_LINE]):
                 _report_model(self.report, self.res, model, pos, WARNING, "env[...]" if role == "env" else "res_model", runtime=True)
 
     def _guarded(self, model: str, line: int) -> bool:
@@ -1236,11 +1257,11 @@ class _PythonChecker:
         for cls in self.facts.get(CLASSES) or ():
             if cls[K_LINE] <= line <= cls[K_END_LINE]:
                 for m in cls[K_METHODS]:
-                    if m[M_LINE] <= line <= m[4]:
-                        return m[M_LINE], m[4]
+                    if m[M_LINE] <= line <= m[M_END_LINE]:
+                        return m[M_LINE], m[M_END_LINE]
         for sym in self.facts.get(SYMBOLS) or ():
-            if sym[1] == "def" and sym[2] <= line <= sym[5]:
-                return sym[2], sym[5]
+            if sym[S_KIND] == "def" and sym[S_LINE] <= line <= sym[S_END_LINE]:
+                return sym[S_LINE], sym[S_END_LINE]
         return None
 
     # -- fields ----------------------------------------------------------------------
@@ -1248,7 +1269,7 @@ class _PythonChecker:
     def _field_ref(self, ref: tuple, role: str) -> None:
         severity, label = PY_FIELD_ROLES[role]
         value = ref[R_VALUE]
-        line, col, end = ref[2], ref[3], ref[4]
+        line, col, end = ref[R_LINE], ref[R_COL], ref[R_END_COL]
         cls = self.class_at(line)
         if role in ("inverse_name", "domain"):
             model = ref[R_CTX][1]  # the comodel
@@ -1312,7 +1333,7 @@ class _PythonChecker:
         if index is None:
             return "other"
         method = methods[index]
-        first = methods[index - 1][4] + 1 if index else cls.start
+        first = methods[index - 1][M_END_LINE] + 1 if index else cls.start
         starts = [n for n in range(first, method[M_LINE]) if _DEPENDS_DECORATOR_RE.match(self._line(n))]
         if len(starts) > 1 and line >= starts[1]:
             return "replaced"
@@ -1328,7 +1349,7 @@ class _PythonChecker:
 
     def _method_ref(self, ref: tuple, role: str) -> None:
         name = ref[R_VALUE]
-        line, col, end = ref[2], ref[3], ref[4]
+        line, col, end = ref[R_LINE], ref[R_COL], ref[R_END_COL]
         cls = self.class_at(line)
         if cls is None or not cls.registered:
             return
@@ -1356,20 +1377,20 @@ class _PythonChecker:
     def _xmlid_ref(self, ref: tuple, role: str) -> None:
         if role == "groups":
             # has_group() and field groups= tolerate groups of modules not installed
-            _report_xmlid(self.report, self.res, ref[R_VALUE], (ref[2], ref[3], ref[4]), WARNING, "groups", dependency=False)
+            _report_xmlid(self.report, self.res, ref[R_VALUE], (ref[R_LINE], ref[R_COL], ref[R_END_COL]), WARNING, "groups", dependency=False)
             return
         call, soft = self._lookup_call(ref)
         if soft:
             return
-        guarded = self._method_guarded(ref[2])
+        guarded = self._method_guarded(ref[R_LINE])
         context = "env.ref()" if call == "ref" else f"{call}()"
-        _report_xmlid(self.report, self.res, ref[R_VALUE], (ref[2], ref[3], ref[4]), WARNING, context, runtime=True, dependency=not guarded)
+        _report_xmlid(self.report, self.res, ref[R_VALUE], (ref[R_LINE], ref[R_COL], ref[R_END_COL]), WARNING, context, runtime=True, dependency=not guarded)
 
     def _lookup_call(self, ref: tuple) -> tuple[str, bool]:
         """(called method, True if the lookup tolerates a missing id)."""
-        line = self._line(ref[2])
-        start = utf16_to_index(line, ref[3])
-        stop = utf16_to_index(line, ref[4])
+        line = self._line(ref[R_LINE])
+        start = utf16_to_index(line, ref[R_COL])
+        stop = utf16_to_index(line, ref[R_END_COL])
         m = _CALL_BEFORE_RE.search(line[: max(0, start - 1)])
         call = m.group(2) if m else "ref"
         tail = line[stop:]
@@ -1377,8 +1398,8 @@ class _PythonChecker:
             return call, True  # e.g. account.chart.template.ref(): template ids, not xml ids
         if re.match(r"""['"]\s*(?:[+%]|\.format\()""", tail):
             return call, True  # 'module.prefix_' + suffix
-        n = ref[2]
-        while ")" not in tail and n < ref[2] + 4:
+        n = ref[R_LINE]
+        while ")" not in tail and n < ref[R_LINE] + 4:
             n += 1
             tail += " " + self._line(n)
         tail = tail.split(")", 1)[0]
@@ -1395,7 +1416,7 @@ class _PythonChecker:
         if res.since((19, 0)) and not mi.get(MI_NAME) and mi.get(MI_INHERIT) and not mi.get(MI_INHERIT_STR):
             target = mi[MI_INHERIT][0]
             if c.model != target:
-                pos = self._find(c.start, c.end, re.compile(r"\b_inherit\b")) or (cls[K_LINE], cls[2], cls[3])
+                pos = self._find(c.start, c.end, re.compile(r"\b_inherit\b")) or (cls[K_LINE], cls[K_COL], cls[K_END_COL])
                 msg = (
                     f"Since Odoo 19.0 a list _inherit without _name defines a new model '{c.model}' (derived from the class name) "
                     f"instead of extending '{target}': write _inherit = '{target}'"
@@ -1405,19 +1426,19 @@ class _PythonChecker:
             if m[M_NAME] == "name_get" and res.since((17, 0)):
                 state = "removed in 18.0" if res.since((18, 0)) else "deprecated"
                 msg = f"name_get() is no longer used for display names since Odoo 17.0 ({state}): override _compute_display_name() on '{c.model}'"
-                self.report.add(WARNING, "deprecated", m[M_LINE], m[2], m[3], msg)
+                self.report.add(WARNING, "deprecated", m[M_LINE], m[M_COL], m[M_END_COL], msg)
             for dec, _args in m[M_DECORATORS]:
                 key = ".".join(dec.split(".")[-2:])
                 removed = REMOVED_DECORATORS.get(key)
                 if removed and res.since(removed[0]):
                     rx = re.compile(r"@\s*(?:odoo\.)?" + re.escape(key) + r"\b")
-                    pos = self._find(m[M_LINE] - 12, m[M_LINE], rx) or (m[M_LINE], m[2], m[3])
+                    pos = self._find(m[M_LINE] - 12, m[M_LINE], rx) or (m[M_LINE], m[M_COL], m[M_END_COL])
                     self.report.add(ERROR_, "deprecated", *pos, removed[1])
         if res.since((19, 0)):
             for a in cls[K_ATTRS]:
                 if a[A_KIND] == "sql_constraints":
                     msg = f"Since Odoo 19.0 _sql_constraints is ignored on '{c.model}': declare models.Constraint('...', '...') class attributes"
-                    self.report.add(WARNING, "deprecated", a[A_LINE], a[2], a[3], msg)
+                    self.report.add(WARNING, "deprecated", a[A_LINE], a[A_COL], a[A_END_COL], msg)
         for f in cls[K_FIELDS]:
             self._field_kwargs(f)
         if res.since((19, 0)) and c.registered:
@@ -1431,7 +1452,7 @@ class _PythonChecker:
             severity = WARNING
             if kw == "group_operator" and not self.res.since((19, 1)):
                 severity, msg = INFO, msg + " (deprecated alias)"
-            pos = self._find(f[F_LINE], f[F_END_LINE], re.compile(r"\b" + kw + r"\s*=")) or (f[F_LINE], f[2], f[3])
+            pos = self._find(f[F_LINE], f[F_END_LINE], re.compile(r"\b" + kw + r"\s*=")) or (f[F_LINE], f[F_COL], f[F_END_COL])
             self.report.add(severity, "deprecated", pos[0], pos[1], pos[1] + len(kw), f"{msg} (field '{f[F_NAME]}')")
 
     def _inherits_links(self, c: _ClassCtx) -> None:
@@ -1444,10 +1465,10 @@ class _PythonChecker:
                 continue
             pos = None
             for ref in self.facts.get(REFS) or ():
-                if ref[R_KIND] == REF_FIELD and ref[R_CTX][0] == "_inherits" and ref[R_VALUE] == fname and c.start <= ref[2] <= c.end:
-                    pos = (ref[2], ref[3], ref[4])
+                if ref[R_KIND] == REF_FIELD and ref[R_CTX][0] == "_inherits" and ref[R_VALUE] == fname and c.start <= ref[R_LINE] <= c.end:
+                    pos = (ref[R_LINE], ref[R_COL], ref[R_END_COL])
                     break
-            pos = pos or (c.facts[K_LINE], c.facts[2], c.facts[3])
+            pos = pos or (c.facts[K_LINE], c.facts[K_COL], c.facts[K_END_COL])
             msg = (
                 f"Since Odoo 19.0 the _inherits link field '{fname}' must be declared on '{c.model}': "
                 f"{fname} = fields.Many2one('{parent}', required=True, ondelete='cascade')"
@@ -1710,7 +1731,7 @@ class _XmlChecker:
         for ref in self.facts.get(REFS) or ():
             kind = ref[R_KIND]
             role = ref[R_CTX][0]
-            pos = (ref[2], ref[3], ref[4])
+            pos = (ref[R_LINE], ref[R_COL], ref[R_END_COL])
             if kind == REF_MODEL and role in _XML_MODEL_CONTEXT:
                 _report_model(self.report, self.res, ref[R_VALUE], pos, ERROR_, _XML_MODEL_CONTEXT[role])
             elif kind == REF_XMLID and role in XML_ROLE_LABELS:
@@ -1724,22 +1745,22 @@ class _XmlChecker:
         value = ref[R_VALUE]
         if not value or "{" in value or " " in value or (role in ("tcall", "view_ref") and "." not in value):
             return
-        line = self._line(ref[2])
-        if role == "eval" and _NOT_FOUND_FALSE_RE.search(line[utf16_to_index(line, ref[4]) :].split(")", 1)[0]):
+        line = self._line(ref[R_LINE])
+        if role == "eval" and _NOT_FOUND_FALSE_RE.search(line[utf16_to_index(line, ref[R_END_COL]) :].split(")", 1)[0]):
             return  # ref('x', raise_if_not_found=False)
         xmlid = self.reg.qualify_xmlid(value, self.res.module)
-        runtime = self._runtime_ref(role, line, ref[3])
+        runtime = self._runtime_ref(role, line, ref[R_COL])
         if role == "tcall" and self.res.xmlid_status(xmlid)[0] == "unknown" and self.res.template_key_exists(xmlid):
             return
         # missing *_view_ref targets and QWeb groups are ignored at runtime
-        soft = role in ("view_ref", "tcall") or (role == "groups" and self._in_qweb(ref[2]))
+        soft = role in ("view_ref", "tcall") or (role == "groups" and self._in_qweb(ref[R_LINE]))
         severity = ERROR_ if role in XML_STRICT_ROLES and not runtime else WARNING
         _report_xmlid(self.report, self.res, xmlid, pos, severity, XML_ROLE_LABELS[role], runtime, dependency=not soft)
 
     def _in_qweb(self, line: int) -> bool:
         for rec in self.facts.get(RECORDS) or ():
-            if rec[3] <= line <= rec[6]:
-                return rec[2] == "template" or (rec[X_INFO] or {}).get("view_type") == "qweb"
+            if rec[X_LINE] <= line <= rec[X_END_LINE]:
+                return rec[X_TAG] == "template" or (rec[X_INFO] or {}).get("view_type") == "qweb"
         return False
 
     @staticmethod
@@ -1905,7 +1926,7 @@ class _XmlChecker:
                 sev, msg = res.adjust(ERROR_, msg)
                 self.report.add(sev, "unknown-field", *pos, msg)
             elif name.startswith("_"):
-                self.report.add(WARNING, "unknown-method", *pos, f"Button method '{name}' is private: Odoo refuses to call '_'-prefixed methods from buttons")
+                self.report.add(WARNING, "private-method", *pos, f"Button method '{name}' is private: Odoo refuses to call '_'-prefixed methods from buttons")
             else:
                 msg = f"Button method '{name}' is not defined on model '{own}' nor on the models of the views it inherits{res.suggest_method(own, name)}"
                 sev, msg = res.adjust(WARNING, msg)
@@ -1931,7 +1952,7 @@ class _XmlChecker:
                     sev, msg = res.adjust(ERROR_, f"Field '{name}' does not exist on model '{target}' ({where}){res.suggest_field(target, name)}")
                     self.report.add(sev, "unknown-field", *pos, msg)
             elif name.startswith("_"):
-                self.report.add(WARNING, "unknown-method", *pos, f"Button method '{name}' is private: Odoo refuses to call '_'-prefixed methods from buttons")
+                self.report.add(WARNING, "private-method", *pos, f"Button method '{name}' is private: Odoo refuses to call '_'-prefixed methods from buttons")
             else:
                 status, modules = res.method_status(target, name)
                 if status != "ok" and not res.model_closed(target):
@@ -2012,7 +2033,7 @@ class _CsvChecker:
         for ref in self.facts.get(REFS) or ():
             kind = ref[R_KIND]
             role = ref[R_CTX][0]
-            pos = (ref[2], ref[3], ref[4])
+            pos = (ref[R_LINE], ref[R_COL], ref[R_END_COL])
             if kind == REF_FIELD and role == "csv_header":
                 self._header(ref[R_VALUE], model, pos)
             elif kind == REF_XMLID:

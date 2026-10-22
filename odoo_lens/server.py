@@ -24,7 +24,7 @@ from . import __version__
 from .documents import DocumentStore, path_to_uri, uri_to_path
 from .envs import Env, EnvManager
 from .extract import extract_source, kind_for_path
-from .facts import CLASSES, K_FIELDS, K_METHODS, K_MODEL, K_NAME, KIND, KIND_MANIFEST, KIND_PY
+from .facts import CLASSES, F_NAME, K_FIELDS, K_METHODS, K_MODEL, K_NAME, KIND, KIND_MANIFEST, KIND_PY, M_NAME
 from .protocol import (
     INVALID_REQUEST,
     NEVER_CANCELLED,
@@ -131,9 +131,9 @@ def _keeps_members(old: dict, new: dict) -> bool:
     for a, b in zip(oc, nc):
         if a[K_MODEL] != b[K_MODEL]:
             return False
-        if not {f[0] for f in a[K_FIELDS]} <= {f[0] for f in b[K_FIELDS]}:
+        if not {f[F_NAME] for f in a[K_FIELDS]} <= {f[F_NAME] for f in b[K_FIELDS]}:
             return False
-        if not {m[0] for m in a[K_METHODS]} <= {m[0] for m in b[K_METHODS]}:
+        if not {m[M_NAME] for m in a[K_METHODS]} <= {m[M_NAME] for m in b[K_METHODS]}:
             return False
     return True
 
@@ -144,7 +144,6 @@ class OdooLanguageServer:
         self.documents = DocumentStore()
         self.envs = EnvManager()
         self.initialized = False
-        self.shutdown_requested = False
         self.client_caps: dict = {}
         self.init_options: dict = {}
         self.workspace_folders: list[str] = []
@@ -169,9 +168,7 @@ class OdooLanguageServer:
         req = ep.on_request
         note = ep.on_notification
         req("initialize", self.on_initialize)
-        req("shutdown", self.on_shutdown)
         note("initialized", self.on_initialized)
-        note("exit", self.on_exit)
         note("textDocument/didOpen", self.on_did_open)
         note("textDocument/didChange", self.on_did_change)
         note("textDocument/didClose", self.on_did_close)
@@ -202,7 +199,7 @@ class OdooLanguageServer:
             self._hint, self._open_hint = self._open_hint, None
             if not self.initialized:
                 raise ResponseError(SERVER_NOT_INITIALIZED, "Server not initialized")
-            if self.shutdown_requested or getattr(self.endpoint, "shutdown_received", False):
+            if getattr(self.endpoint, "shutdown_received", False):
                 raise ResponseError(INVALID_REQUEST, "Server is shutting down")
             return handler(params or {}, token)
 
@@ -257,13 +254,6 @@ class OdooLanguageServer:
                 self.ensure_index(env)
         if REFRESH_INTERVAL > 0:
             self.endpoint.post_later(REFRESH_INTERVAL, "refresh", self._refresh_tick)
-
-    def on_shutdown(self, params: Any, token: CancelToken) -> None:
-        self.shutdown_requested = True
-        return None
-
-    def on_exit(self, params: Any) -> None:
-        self.endpoint.stop()
 
     def _watch_parent(self) -> None:
         while not self.endpoint._stopped:
@@ -397,8 +387,7 @@ class OdooLanguageServer:
         log.info("new module %s: indexing it now", rel[0])
         reg.set_modules({**reg.module_dirs, rel[0]: mod_dir})
         if not self._refreshing:
-            self._refreshing = True
-            threading.Thread(target=self._refresh_bg, args=([env],), name="odoo-lens-refresh", daemon=True).start()
+            self._start_refresh([env])
 
     def _matches_index(self, reg: Any, path: str) -> bool:
         """True if the open document's text is exactly the indexed disk content
@@ -487,32 +476,44 @@ class OdooLanguageServer:
     # ----------------------------------------------------------- refresh
 
     def _refresh_tick(self) -> None:
-        if self.shutdown_requested:
+        if getattr(self.endpoint, "shutdown_received", False):
             return
         if not self._refreshing:
             envs = [e for e in self.envs.envs.values() if e.registry is not None and not e.indexing]
             if envs:
-                self._refreshing = True
-                threading.Thread(target=self._refresh_bg, args=(envs,), name="odoo-lens-refresh", daemon=True).start()
+                self._start_refresh(envs)
         self.endpoint.post_later(REFRESH_INTERVAL, "refresh", self._refresh_tick)
 
-    def _refresh_bg(self, envs: list[Env]) -> None:
+    def _start_refresh(self, envs: list[Env]) -> None:
+        """Start a stat sweep of ``envs`` in the background (dispatcher thread only).
+
+        The sweep compares against copies of each registry's ``file_stats`` and
+        ``module_dirs`` taken here: the background thread never reads a published
+        registry."""
+        snapshots = []
+        for env in envs:
+            reg = env.registry
+            if reg is not None:
+                snapshots.append((env, reg, dict(reg.file_stats), dict(reg.module_dirs)))
+        if not snapshots:
+            return
+        self._refreshing = True
+        threading.Thread(target=self._refresh_bg, args=(snapshots,), name="odoo-lens-refresh", daemon=True).start()
+
+    def _refresh_bg(self, snapshots: list[tuple[Env, Any, dict, dict]]) -> None:
         from .indexer import extract_files, scan
 
         try:
-            for env in envs:
-                reg = env.registry
-                if reg is None:
-                    continue
+            for env, reg, file_stats, module_dirs in snapshots:
                 sc = scan(env)
                 seen = set()
                 todo = []
                 for fe in sc.all_files():
                     seen.add(fe.path)
-                    if reg.file_stats.get(fe.path) != (fe.mtime, fe.size):
+                    if file_stats.get(fe.path) != (fe.mtime, fe.size):
                         todo.append(fe)
-                removed = [p for p in list(reg.file_stats) if p not in seen]
-                modules_changed = sc.modules != reg.module_dirs
+                removed = [p for p in file_stats if p not in seen]
+                modules_changed = sc.modules != module_dirs
                 if not todo and not removed and not modules_changed:
                     continue
                 results = extract_files(todo)
@@ -901,9 +902,9 @@ def serve_stdio() -> int:
             os._exit(code)
 
     endpoint.on_exit = hard_exit
-    server = OdooLanguageServer(endpoint)
+    OdooLanguageServer(endpoint)  # registers its handlers on the endpoint
     endpoint.serve_forever()
     # stdin EOF (or stop): the reader thread is blocked in readline() holding the
     # buffer lock, so a regular interpreter shutdown would abort - leave directly
-    hard_exit(0 if (server.shutdown_requested or endpoint.shutdown_received) else 1)
+    hard_exit(0 if endpoint.shutdown_received else 1)
     return 0

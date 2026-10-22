@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 # odoo-lens launcher: runs the (stdlib-only) server with the first Python >= 3.12 found
-# (Odoo saas-19.1+ sources need the 3.12 parser), falling back to >= 3.10.
+# (Odoo saas-19.1+ sources need the 3.12 parser), falling back to >= 3.10 with a warning.
 # Claude Code may be started from a GUI with a minimal PATH, so well-known install
-# locations are probed too. Override with ODOO_LENS_PYTHON=/path/to/python3.
+# locations are probed too. ODOO_LENS_PYTHON=/path/to/python3 (>= 3.10) skips the probing.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
-candidates=("${ODOO_LENS_PYTHON:-}")
+old_python_warning="odoo-lens: warning: %s is older than Python 3.12; Odoo saas-19.1+ sources need 3.12 to be indexed\n"
+if [ -n "${ODOO_LENS_PYTHON:-}" ]; then
+  py="$ODOO_LENS_PYTHON"
+  if ! command -v "$py" >/dev/null 2>&1; then
+    echo "odoo-lens: ODOO_LENS_PYTHON=$py not found" >&2
+    exit 1
+  fi
+  if ! "$py" -c "import sys; sys.exit(sys.version_info < (3, 10))" 2>/dev/null; then
+    echo "odoo-lens: ODOO_LENS_PYTHON=$py is not Python >= 3.10" >&2
+    exit 1
+  fi
+  "$py" -c "import sys; sys.exit(sys.version_info < (3, 12))" 2>/dev/null || printf "$old_python_warning" "$py" >&2
+  # -I: isolated mode, so a workspace's odoo/ package or a stray json.py can never shadow our imports
+  exec "$py" -I "$root/odoo_lens_main.py" "$@"
+fi
+candidates=()
 for v in 3.12 3.13 3.14 3.15; do
   candidates+=("python$v" "/opt/homebrew/bin/python$v" "/usr/local/bin/python$v" "$HOME/.local/bin/python$v" "$HOME/.pyenv/shims/python$v" "/usr/bin/python$v")
 done
@@ -13,10 +28,9 @@ candidates+=(python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 python3.11
 min=12
 for pass in 1 2; do
   for py in "${candidates[@]}"; do
-    [ -n "$py" ] || continue
     command -v "$py" >/dev/null 2>&1 || continue
     if "$py" -c "import sys; sys.exit(sys.version_info < (3, $min))" 2>/dev/null; then
-      # -I: isolated mode, so a workspace's odoo/ package or a stray json.py can never shadow our imports
+      [ "$min" = 12 ] || printf "$old_python_warning" "$py" >&2
       exec "$py" -I "$root/odoo_lens_main.py" "$@"
     fi
   done

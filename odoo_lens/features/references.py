@@ -13,16 +13,17 @@ hand-built targets. Sources, cheapest first:
   ``<field name>`` elements (re-extracted in full), CSV headers, Python
   attribute / call / string usages whose receiver model is inferred
   (``analysis.python.member_usages``), imports for modules and generic Python
-  symbols.
+  symbols, JS imports (and the local names they bind) for JS symbols.
 
 Scans only visit modules that can see the target, prefilter file contents with
 byte searches, run in relevance order (current file, customer modules, then
-core files most likely to type a receiver as the target model) and stop at a
-time box, or as soon as the hits found fill the capped answer several times
-over. Results are deduplicated, ranked - current file, customer modules
-(``env.custom_roots``), primary before secondary references (data records'
-``<field name>`` and ``model=``, CSV headers, anything in test files), module
-load order, path/line - and capped.
+core files most likely to type a receiver as the target model; Python files
+never loaded - migrations, upgrade scripts - last) and stop at a time box, or
+as soon as the hits found fill the capped answer several times over. Results
+are deduplicated, ranked - current file, never-loaded Python files last,
+customer modules (``env.custom_roots``), primary before secondary references
+(data records' ``<field name>`` and ``model=``, CSV headers, anything in test
+files), module load order, path/line - and capped.
 """
 
 from __future__ import annotations
@@ -38,10 +39,12 @@ from typing import Any, Callable, Iterator
 
 from ..analysis import targets_at
 from ..analysis.targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID, Target
+from ..analysis.js import LIB_ALIASES, import_bindings
 from ..analysis.xml import ARCH_ROLES, MODEL_ROLES, arch_ref_candidates, arch_ref_model
-from ..documents import utf16_len
+from ..documents import utf16_len, utf16_to_index
 from ..extract import extract_source
 from ..facts import (
+    A_NAME,
     CLASSES,
     CSV_MODEL,
     F_ARGS,
@@ -89,8 +92,8 @@ from ..facts import (
     SYMBOLS,
     X_MODEL,
 )
-from ..registry import MemberDef
-from .navigation import class_spot, descendants, field_implementations, member_spot, method_implementations, record_spot
+from ..registry import UNLOADED_DIRS, MemberDef
+from .navigation import class_spot, descendants, field_implementations, member_spot, method_implementations, record_spot, trust_unknown_receiver
 
 log = logging.getLogger("odoo_lens.references")
 
@@ -99,7 +102,6 @@ MAX_PY_REFERENCES = 100  # generic Python symbols / files: name-based, keep it s
 MAX_MODELS = 3  # ambiguous member targets: union over the best candidate models
 BUDGET = float(os.environ.get("ODOO_LENS_REFS_BUDGET", "2.2"))  # seconds of scanning per request (one file may overrun it by ~0.3 s)
 CORE_PY_SHARE = 0.7  # share of the budget core Python scans may use before XML records get their turn
-UNIQUE_MEMBER = 2  # unknown receivers count only when at most this many models define the name
 MAX_ARCH_CANDIDATES = 3
 SOURCE_CACHE_BYTES = 32 << 20
 USAGE_CACHE_SIZE = 50_000
@@ -113,13 +115,20 @@ _USAGE_KINDS = {
     "method": frozenset({"call", "attr", "super"}),
     "attr": frozenset({"attr", "call"}),
 }
-_UNLOADED = tuple(f"{os.sep}{d}{os.sep}" for d in ("migrations", "upgrades", "upgrade", "static"))
+_UNLOADED = tuple(f"{os.sep}{d}{os.sep}" for d in sorted(UNLOADED_DIRS - {"tests"}))  # tests have their own tier
 _TESTS = f"{os.sep}tests{os.sep}"
 _IDENT = re.compile(rb"[A-Za-z_]\w*")
 _QUOTED_MODEL = re.compile(rb"""['"]([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)['"]""")
 _MANY_NEEDLES = 16  # above this many needles, one identifier/regex pass beats repeated bytes.find
 # strings and comments of Python source (best effort: prefixes, triple quotes, escapes)
 _PY_SKIP = re.compile(r'''#[^\n]*|[rRbBuUfF]{0,2}(?:"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')''')
+# strings, template literals and comments of JS source (best effort: no regex literals)
+_JS_SKIP = re.compile(r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\[\s\S]|[^`\\])*`''')
+_JS_IDENT = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_STAR_EXPORT = re.compile(r"""\bexport\s*\*\s*from\s*(["'])([^"'\n]+)\1""")
+_JS_STAR_EXPORT_B = re.compile(rb"""\bexport\s*\*\s*from\b""")  # byte prefilter: such barrels need not name the symbol
+_JS_EXPORT_LIST = re.compile(r"""\bexport\s*\{([^}]*)\}(\s*from\b)?""")
+_JS_EXPORT_DEFAULT = re.compile(r"""\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?\s*$""", re.M)
 
 
 # ---------------------------------------------------------------------------
@@ -354,21 +363,25 @@ class _Search:
         return _SOURCES.get(path)
 
     def code(self, path: str) -> _PyCode | None:
+        """Text of a Python or JS file with its strings and comments located."""
         if path not in self._code:
             src = self.source(path)[0]
-            self._code[path] = _PyCode(src.decode("utf-8", "replace")) if src is not None else None
+            js = path.endswith(".js")
+            self._code[path] = _PyCode(src.decode("utf-8", "replace"), _JS_SKIP if js else _PY_SKIP, not js) if src is not None else None
         return self._code[path]
 
     def file_key(self, path: str) -> tuple:
-        """Ranking of a file: current file, customer modules, non-test files,
-        load order of the module, path."""
+        """Ranking of a file: current file, Python files never loaded
+        (migrations...) last, customer modules, non-test files, load order of
+        the module, path."""
         key = self._file_keys.get(path)
         if key is None:
             reg = self.reg
             info = reg.module(reg.module_of_path(path))
             root = info.path if info is not None else self.ctx.env.root_of(path)
             rel = path[len(root) :] if root else path
-            key = (path != self.ctx.path, not path.startswith(self.index.custom_prefixes), _TESTS in rel, info.rank if info else -1, path)
+            unloaded = path.endswith(".py") and any(u in rel for u in _UNLOADED)
+            key = (path != self.ctx.path, unloaded, not path.startswith(self.index.custom_prefixes), _TESTS in rel, info.rank if info else -1, path)
             self._file_keys[path] = key
         return key
 
@@ -378,7 +391,7 @@ class _Search:
         def sort_key(item: tuple) -> tuple:
             (path, line, col), (_end, tier) = item
             fk = file_key(path)
-            return (fk[0], fk[1], max(fk[2], tier), fk[3], path, line, col)
+            return (fk[0], fk[1], fk[2], max(fk[3], tier), fk[4], path, line, col)
 
         items = sorted(self.hits.items(), key=sort_key)
         if len(items) > cap or self.stopped:
@@ -602,13 +615,14 @@ class _Search:
         """Python usages and XML record fields, most relevant files first:
         current file, customer modules, then core files grouped by how likely
         they type a receiver as a family model (their classes, the model name
-        quoted, a relational field pointing to it); tests last."""
+        quoted, a relational field pointing to it); tests, then Python files
+        never loaded (migrations...), last."""
         reg, ctx = self.reg, self.ctx
         finder = _usage_finder()
         if finder is None:
             log.debug("references: analysis.python.member_usages unavailable, Python usages skipped")
         records = which == "field"
-        pyscan = _PyScan(self, finder, name, which, in_family, len(reg.models_with_member(name)) <= UNIQUE_MEMBER)
+        pyscan = _PyScan(self, finder, name, which, in_family, trust_unknown_receiver(reg, name))
         if ctx.kind == KIND_PY and finder is not None:
             pyscan.scan(ctx.path)
         elif ctx.kind == KIND_XML and records:
@@ -617,12 +631,17 @@ class _Search:
         core_py: list[tuple] = []
         custom_xml: list[tuple] = []
         core_xml: list[tuple] = []
+        unloaded_py: list[str] = []  # migrations / upgrade scripts: scanned (and ranked) last
         for mod, entries in self.index.files(reg, ctx.env).items():
             if not self._module_visible(mod, modules):
                 continue
             custom = mod in self.index.custom_modules
             for e in entries:
-                if e[0] == ctx.path or e[3]:
+                if e[0] == ctx.path:
+                    continue
+                if e[3]:
+                    if e[1] == KIND_PY and finder is not None:
+                        unloaded_py.append(e[0])
                     continue
                 if e[1] == KIND_PY and finder is not None:
                     (custom_py if custom else core_py).append(e)
@@ -646,6 +665,11 @@ class _Search:
             if not test and records:
                 self.xml_records([e[0] for e in sorted(core_xml, key=order)], name, in_family)
         for path in pyscan.leftovers:
+            if self.should_stop():
+                return
+            pyscan.scan(path)
+        unloaded_py.sort(key=self.file_key)
+        for path in pyscan.ordered(unloaded_py, family, unresolved, None, keep_rest=True):
             if self.should_stop():
                 return
             pyscan.scan(path)
@@ -680,12 +704,15 @@ class _Search:
     def pysym(self, target: Target) -> None:
         """Name-based references of a Python symbol: occurrences in its scope
         (function for locals), plus in the files importing it (following package
-        re-exports) for module-level symbols and members of plain classes."""
+        re-exports) for module-level symbols and members of plain classes. JS
+        symbols (a ``.js`` path) go to :meth:`jssym`."""
         path, name = target.path, target.name
         if not path or not name:
             return
         code = self.code(path)
-        if code is not None:
+        if path.endswith(".js"):
+            self.jssym(target, code)
+        elif code is not None:
             facts = self.ctx.facts if path == self.ctx.path else self.reg.file_facts(path)
             scope, lo, hi, owner = _py_scope(facts or {}, target.line, name)
             dotted = self.reg.py_dotted_name(path)
@@ -708,14 +735,88 @@ class _Search:
         else:
             self.hits.pop((path, target.line, target.col), None)
 
+    def jssym(self, target: Target, code: _PyCode | None) -> None:
+        """Name-based references of a JS symbol: occurrences in its file, then
+        in the JS modules importing it (named, renamed, default and namespace
+        imports, following ``export ... from`` re-exports), under the local
+        name each of them binds it to."""
+        path, name = target.path or "", target.name or ""
+        # the import under the cursor (the name it binds here, ``ns.name`` for a
+        # namespace): scanned first, however long the re-export chain to ``path``
+        here = target.extra.get("local") if self.ctx.path != path and self.ctx.path.endswith(".js") else None
+        if here:
+            ns, _, member = here.rpartition(".")
+            code_here = self.code(self.ctx.path)
+            if code_here is not None:
+                self.scan_code(self.ctx.path, code_here, _js_member_rx(ns, member) if ns else _js_bare_rx(member))
+        exported_as: list[str] = []
+        if code is not None:
+            local = _js_declared(code, target.line, target.col) or (name if name != "default" else None)
+            if local:
+                self.scan_code(path, code, _js_bare_rx(local))
+                exported_as = _js_exported_as(code, target.line, local)
+        # ``name`` is the name the importer used: through ``export {a as b} from``
+        # re-exports it differs from the names the defining module exports
+        todo = [(path, n) for n in dict.fromkeys([*exported_as, name])]
+        seen = set(todo)
+        importers: dict[str, tuple[set[str], list[str]]] = {}  # module -> (its specifiers, JS files importing it)
+        for _depth in range(REEXPORT_DEPTH + 1):
+            wanted: dict[str, list[tuple[str, str, set[str]]]] = defaultdict(list)  # importer -> [(module, name, its specifiers)]
+            for mod_path, exported in todo:
+                if mod_path not in importers:
+                    specs = _js_specs(self.reg, mod_path)
+                    importers[mod_path] = (specs, self.js_importers(mod_path, specs))
+                specs, ipaths = importers[mod_path]
+                for ipath in ipaths:
+                    if ipath != path:
+                        wanted[ipath].append((mod_path, exported, specs))
+            nxt: list[tuple[str, str]] = []
+            for ipath in sorted(wanted, key=self.file_key):
+                if self.should_stop():
+                    return
+                if self.full_before(ipath):
+                    break  # the next level's importers may still rank before
+                src = self.source(ipath)[0]
+                if not src or not (any(exported == "default" or exported.encode() in src for _m, exported, _s in wanted[ipath]) or _JS_STAR_EXPORT_B.search(src)):
+                    continue
+                code = self.code(ipath)
+                if code is None:
+                    continue
+                bindings = import_bindings(code.text)
+                for mod_path, exported, specs in wanted[ipath]:
+                    for local, (spec, imported) in bindings.items():
+                        if not _js_spec_matches(ipath, spec, mod_path, specs):
+                            continue
+                        if imported == exported:
+                            self.scan_code(ipath, code, _js_bare_rx(local))
+                            nxt.extend((ipath, alias) for alias in _js_reexports(code.text, local))
+                        elif imported == "*" and exported != "default":
+                            self.scan_code(ipath, code, _js_member_rx(local, exported))
+                    if exported != "default" and _js_star_reexport(code.text, ipath, mod_path, specs):
+                        nxt.append((ipath, exported))
+            todo = [t for t in dict.fromkeys(nxt) if t not in seen]
+            if not todo:
+                return
+            seen.update(todo)
+
+    def js_importers(self, path: str, specs: set[str]) -> list[str]:
+        """JS files with an import / re-export specifier resolving to ``path``."""
+        out: list[str] = []
+        for jpath, facts in self.reg.iter_files(KIND_JS):
+            if any(_js_spec_matches(jpath, spec, path, specs) for spec, _line, _col, _end in facts.get(IMPORTS) or ()):
+                out.append(jpath)
+        return out
+
+    def full_before(self, path: str) -> bool:
+        """The capped answer is full of hits ranking before ``path``'s."""
+        key = self.file_key(path)
+        return sum(1 for p, _line, _col in self.hits if self.file_key(p) < key) >= self.cap
+
     def scan_importers(self, uses: dict[str, set[re.Pattern]]) -> None:
         """Scan importing files in ranking order; stop once the capped answer
         is full of hits ranking before the next file."""
         for path in sorted(uses, key=self.file_key):
-            if self.should_stop():
-                return
-            key = self.file_key(path)
-            if sum(1 for p, _line, _col in self.hits if self.file_key(p) < key) >= self.cap:
+            if self.should_stop() or self.full_before(path):
                 return
             code = self.code(path)
             for rx in uses[path] if code is not None else ():
@@ -759,7 +860,7 @@ class _Search:
         end = code.offset(hi + 1) if hi is not None else len(text)
         for m in rx.finditer(text, start, end):
             s, e = m.span(1)
-            if code.skipped(s) or (text[e : e + 1] == "=" and text[e + 1 : e + 2] != "="):
+            if code.skipped(s) or (code.kwargs and text[e : e + 1] == "=" and text[e + 1 : e + 2] != "="):
                 continue
             self.add(path, *code.position(s, e))
 
@@ -790,18 +891,10 @@ class _Search:
                 self.add(path, imp[I_LINE], imp[I_COL], imp[I_COL] + len(last))
 
     def _js_imports(self, path: str) -> None:
-        reg = self.reg
-        mod = reg.module_of_path(path)
-        info = reg.module(mod)
-        specs: set[str] = set()
-        if info is not None:
-            rel = os.path.relpath(path, info.path).replace(os.sep, "/")
-            if rel.startswith("static/src/"):
-                spec = f"@{mod}/{rel[len('static/src/') :]}"
-                specs = {spec, spec[:-3] if spec.endswith(".js") else spec}
-        for jpath, facts in reg.iter_files(KIND_JS):
+        specs = _js_specs(self.reg, path)
+        for jpath, facts in self.reg.iter_files(KIND_JS):
             for spec, line, col, end in facts.get(IMPORTS) or ():
-                if spec in specs or (spec.startswith(".") and _resolve_js(jpath, spec) == path):
+                if _js_spec_matches(jpath, spec, path, specs):
                     self.add(jpath, line, col, end)
 
     def _manifest_entries(self, path: str) -> None:
@@ -930,7 +1023,7 @@ def _declarations(reg: Any, model: str, name: str, which: str) -> list[MemberDef
         return field_implementations(reg, model, name)
     if which == "method":
         return method_implementations(reg, model, name)
-    own = [MemberDef("attr", name, c, a) for m in descendants(reg, model) for c in reg.model_classes(m) for a in c.facts[K_ATTRS] if a[0] == name]
+    own = [MemberDef("attr", name, c, a) for m in descendants(reg, model) for c in reg.model_classes(m) for a in c.facts[K_ATTRS] if a[A_NAME] == name]
     return reg.attr(model, name)[::-1] + own
 
 
@@ -1004,19 +1097,99 @@ def _qualified_rx(alias: str, name: str) -> re.Pattern:
     return re.compile(r"(?<![\w.])" + re.escape(alias) + r"\s*\.\s*(" + re.escape(name) + r")\b")
 
 
-def _resolve_js(importer: str, spec: str) -> str:
+def _js_specs(reg: Any, path: str) -> set[str]:
+    """Non-relative specifiers resolving to the JS file ``path`` (the inverse
+    of ``analysis.js.resolve_specifier``)."""
+    mod = reg.module_of_path(path)
+    info = reg.module(mod)
+    if info is None:
+        return set()
+    rel = os.path.relpath(path, info.path).replace(os.sep, "/")
+    specs = {alias for alias, (lib_mod, lib_rel) in LIB_ALIASES.items() if lib_mod == mod and lib_rel == rel}
+    for prefix, base in (("static/src/", ""), ("static/tests/", "../tests/"), ("static/lib/", "../lib/")):
+        if rel.startswith(prefix) and rel.endswith(".js"):
+            spec = f"@{mod}/{base}{rel[len(prefix) : -3]}"
+            specs |= {spec, spec + ".js"}
+            if spec.endswith("/index"):
+                specs.add(spec[: -len("/index")])
+    return specs
+
+
+def _js_spec_matches(importer: str, spec: str, path: str, specs: set[str]) -> bool:
+    """Specifier ``spec`` written in ``importer`` resolves to ``path`` (``specs``:
+    its non-relative specifiers)."""
+    if not spec.startswith("."):
+        return spec in specs
     target = os.path.normpath(os.path.join(os.path.dirname(importer), spec))
-    return target if target.endswith(".js") else target + ".js"
+    return path in (target, target + ".js", os.path.join(target, "index.js"))
+
+
+def _js_declared(code: _PyCode, line: int, col: int) -> str | None:
+    """Identifier declared at ``line:col`` of a JS file (None for an anonymous
+    ``export default``)."""
+    start = code.offset(line)
+    end = code.text.find("\n", start)
+    text = code.text[start : end if end >= 0 else len(code.text)]
+    m = _JS_IDENT.match(text, utf16_to_index(text, col))
+    if m is None or m.group() in ("export", "default") or text[m.end() :].lstrip().startswith("."):
+        return None  # anonymous default export, or ``export default expr.member``: no local binding
+    return m.group()
+
+
+def _js_exported_as(code: _PyCode, line: int, local: str) -> list[str]:
+    """Names under which a JS module exports its declaration ``local`` on
+    ``line``: ``export [default] function local``, ``export {local as x}``,
+    ``export default local``."""
+    start = code.offset(line)
+    m = re.match(r"[ \t]*export\s+(default\b)?", code.text[start : start + 80])
+    out = (["default" if m.group(1) else local] if m else []) + _js_reexports(code.text, local)
+    return list(dict.fromkeys(out))
+
+
+def _js_star_reexport(text: str, importer: str, path: str, specs: set[str]) -> bool:
+    """``text`` re-exports every name of ``path`` (``export * from``)."""
+    if "export" not in text:
+        return False
+    return any(_js_spec_matches(importer, m.group(2), path, specs) for m in _JS_STAR_EXPORT.finditer(text))
+
+
+def _js_reexports(text: str, local: str) -> list[str]:
+    """Names under which a module exports its binding ``local`` (``export {local
+    as x}``, ``export {x as local} from``, ``export default local``)."""
+    if "export" not in text:
+        return []
+    out = []
+    for m in _JS_EXPORT_LIST.finditer(text):
+        for part in m.group(1).split(","):
+            name, _, alias = part.strip().partition(" as ")
+            name, alias = name.strip(), alias.strip()
+            if m.group(2):  # export {name as alias} from: ``alias`` is the local binding
+                if (alias or name) == local:
+                    out.append(local)
+            elif name == local:
+                out.append(alias or name)
+    out.extend("default" for m in _JS_EXPORT_DEFAULT.finditer(text) if m.group(1) == local)
+    return out
+
+
+def _js_bare_rx(name: str) -> re.Pattern:
+    return re.compile(r"(?:(?<=\.\.\.)|(?<![\w$.]))(" + re.escape(name) + r")(?![\w$])")
+
+
+def _js_member_rx(namespace: str, name: str) -> re.Pattern:
+    return re.compile(r"(?<![\w$.])" + re.escape(namespace) + r"\s*\.\s*(" + re.escape(name) + r")(?![\w$])")
+
 
 
 class _PyCode:
-    """Python text with its string/comment spans and line offsets."""
+    """Python (or JS) text with its string/comment spans and line offsets."""
 
-    __slots__ = ("text", "starts", "ends", "lines")
+    __slots__ = ("text", "starts", "ends", "lines", "kwargs")
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, skip: re.Pattern = _PY_SKIP, kwargs: bool = True):
         self.text = text
-        spans = [m.span() for m in _PY_SKIP.finditer(text)]
+        self.kwargs = kwargs  # ``name=`` is a keyword argument (Python), not a use
+        spans = [m.span() for m in skip.finditer(text)]
         self.starts = [s for s, _ in spans]
         self.ends = [e for _, e in spans]
         self.lines = [0] + [m.end() for m in re.finditer("\n", text)]

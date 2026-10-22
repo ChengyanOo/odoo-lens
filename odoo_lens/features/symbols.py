@@ -1507,12 +1507,12 @@ def _class_entries(ix: _Index, path: str, refs: list[tuple[str, Any]]) -> list[t
         if model:
             out.append((cu, rk, path, k[K_LINE], k[K_COL], k[K_END_COL], "model", model, SK_CLASS, c))
         for f in k[K_FIELDS]:
-            out.append((cu, rk, path, f[1], f[2], f[3], "field", f[0], SK_FIELD, (model, c, f, None)))
+            out.append((cu, rk, path, f[F_LINE], f[F_COL], f[F_END_COL], "field", f[F_NAME], SK_FIELD, (model, c, f, None)))
         for m in k[K_METHODS]:
-            out.append((cu, rk, path, m[1], m[2], m[3], "method", m[0], SK_METHOD, (model, c, m, None)))
+            out.append((cu, rk, path, m[M_LINE], m[M_COL], m[M_END_COL], "method", m[M_NAME], SK_METHOD, (model, c, m, None)))
         for a in k[K_ATTRS]:
-            if a[0] not in MODEL_DECL_ATTRS:
-                out.append((cu, rk, path, a[1], a[2], a[3], "attr", a[0], _attr_kind(a), (model, c, a, None)))
+            if a[A_NAME] not in MODEL_DECL_ATTRS:
+                out.append((cu, rk, path, a[A_LINE], a[A_COL], a[A_END_COL], "attr", a[A_NAME], _attr_kind(a), (model, c, a, None)))
     return out
 
 

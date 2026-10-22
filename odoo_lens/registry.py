@@ -35,14 +35,30 @@ import re
 from collections import defaultdict
 from typing import Any, Iterable, Iterator
 
+from .extract.common import SrcIndex
 from .facts import (
+    A_COL,
+    A_END_COL,
+    A_LINE,
+    A_NAME,
     CLASSES,
-    IMPORTS,
     F_ARGS,
+    F_COL,
     F_COMODEL,
+    F_END_COL,
+    F_END_LINE,
+    F_LINE,
     F_NAME,
     F_TYPE,
+    I_LEVEL,
+    I_LINE,
+    I_MODULE,
+    I_NAME,
+    IMPORTS,
     K_ATTRS,
+    K_COL,
+    K_END_COL,
+    K_END_LINE,
     K_FIELDS,
     K_LINE,
     K_METHODS,
@@ -54,6 +70,10 @@ from .facts import (
     KIND_MANIFEST,
     KIND_PY,
     KIND_XML,
+    M_COL,
+    M_END_COL,
+    M_LINE,
+    M_NAME,
     MANIFEST_DATA,
     MANIFEST_DEMO,
     MANIFEST_DEPENDS,
@@ -64,7 +84,11 @@ from .facts import (
     MI_INHERITS,
     MI_KIND,
     MI_NAME,
+    R_COL,
+    R_CTX,
+    R_END_COL,
     R_KIND,
+    R_LINE,
     R_VALUE,
     RECORDS,
     REF_FIELD,
@@ -74,11 +98,17 @@ from .facts import (
     REF_QWEB,
     REF_XMLID,
     REFS,
+    X_COL,
+    X_END_COL,
     X_ID,
     X_INFO,
+    X_LINE,
     X_MODEL,
     X_TAG,
 )
+
+# MemberDef and _members_of read Field, Method and ClassAttr tuples alike.
+assert (F_NAME, F_LINE, F_COL, F_END_COL) == (M_NAME, M_LINE, M_COL, M_END_COL) == (A_NAME, A_LINE, A_COL, A_END_COL)
 
 # Fields every model has (16-18: synthesized by MetaModel; 19+: id/display_name
 # declared on BaseModel, log-access fields still synthesized).
@@ -108,15 +138,13 @@ def _magic_positions(path: str) -> dict[str, tuple[int, int, int]]:
     except OSError:
         return {}
     out: dict[str, tuple[int, int, int]] = {}
+    s = SrcIndex(src)
     for m in _MAGIC_ADD.finditer(src):
         g = 1 if m.group(1) else 2
         name = m.group(1).decode() if g == 1 else "__last_update"
         if name in out:
             continue
-        start = m.start(g)
-        bol = src.rfind(b"\n", 0, start) + 1
-        line = src.count(b"\n", 0, start)
-        out[name] = (line, start - bol, m.end(g) - bol)
+        out[name] = s.span(m.start(g), m.end(g))
     return out
 
 FRAMEWORK_CHAINS = {
@@ -207,15 +235,15 @@ class MemberDef:
 
     @property
     def line(self) -> int:
-        return self.facts[1]
+        return self.facts[F_LINE]
 
     @property
     def col(self) -> int:
-        return self.facts[2]
+        return self.facts[F_COL]
 
     @property
     def end_col(self) -> int:
-        return self.facts[3]
+        return self.facts[F_END_COL]
 
     def __repr__(self) -> str:
         return f"<{self.kind} {self.cls.model}.{self.name} {self.module} {os.path.basename(self.path)}:{self.line + 1}>"
@@ -247,15 +275,15 @@ class RecordRef:
 
     @property
     def line(self) -> int:
-        return self.facts[3]
+        return self.facts[X_LINE]
 
     @property
     def col(self) -> int:
-        return self.facts[4]
+        return self.facts[X_COL]
 
     @property
     def end_col(self) -> int:
-        return self.facts[5]
+        return self.facts[X_END_COL]
 
     def __repr__(self) -> str:
         return f"<Record {self.xmlid} {self.model} {os.path.basename(self.path)}:{self.line + 1}>"
@@ -273,34 +301,34 @@ class RefHit:
 
     @property
     def kind(self) -> str:
-        return self.facts[0]
+        return self.facts[R_KIND]
 
     @property
     def value(self) -> str:
-        return self.facts[1]
+        return self.facts[R_VALUE]
 
     @property
     def line(self) -> int:
-        return self.facts[2]
+        return self.facts[R_LINE]
 
     @property
     def col(self) -> int:
-        return self.facts[3]
+        return self.facts[R_COL]
 
     @property
     def end_col(self) -> int:
-        return self.facts[4]
+        return self.facts[R_END_COL]
 
     @property
     def ctx(self) -> tuple:
-        return self.facts[5]
+        return self.facts[R_CTX]
 
     def __repr__(self) -> str:
         return f"<Ref {self.kind} {self.value} {os.path.basename(self.path)}:{self.line + 1}>"
 
 
 def _import_key(facts: dict) -> list:
-    return [i[:4] for i in facts.get(IMPORTS) or ()]
+    return [i[:I_LINE] for i in facts.get(IMPORTS) or ()]
 
 
 def _load_keys(modules: dict[str, ModuleInfo], test_rule: bool = False) -> dict[str, tuple[int, str]]:
@@ -401,7 +429,7 @@ class Registry:
         here = os.path.dirname(path)
         out: list[str] = []
         for imp in facts.get(IMPORTS) or ():
-            mod, name, level = imp[0], imp[1], imp[3]
+            mod, name, level = imp[I_MODULE], imp[I_NAME], imp[I_LEVEL]
             targets = []
             if level:
                 d = here
@@ -543,7 +571,7 @@ class Registry:
             deps: list[str] = []
             if facts and facts.get(KIND) == KIND_MANIFEST:
                 values = facts.get(MANIFEST_VALUES) or {}
-                deps = [d[0] for d in facts.get(MANIFEST_DEPENDS) or ()]
+                deps = [dep for dep, _line, _col, _end_col in facts.get(MANIFEST_DEPENDS) or ()]
             info.values = values
             if not deps and name != "base":
                 deps = ["base"]
@@ -562,28 +590,28 @@ class Registry:
             if not facts or facts.get(KIND) != KIND_MANIFEST:
                 continue
             entries = list(facts.get(MANIFEST_DATA) or ()) + list(facts.get(MANIFEST_DEMO) or ())
-            for i, entry in enumerate(entries):
-                self._data_order.setdefault(os.path.normpath(os.path.join(info.path, entry[0])), i)
+            for i, (rel, _line, _col, _end_col) in enumerate(entries):
+                self._data_order.setdefault(os.path.normpath(os.path.join(info.path, rel)), i)
         self._cache.clear()
 
     def _ref_keys(self, facts: dict, module: str | None) -> Iterator[tuple[str, str]]:
         qualify = self.qualify_xmlid
         for ref in facts.get(REFS) or ():
-            rk = ref[0]
+            rk = ref[R_KIND]
             if rk == REF_FIELD or rk == REF_METHOD:
-                role = ref[5][0]
+                role = ref[R_CTX][0]
                 if role == "record" or role == "csv_header":
                     continue  # high-volume: searched on demand (see refs_in_records)
-                v = ref[1]
+                v = ref[R_VALUE]
                 if "." in v:
                     for seg in v.split("."):
                         yield (rk, seg), ref
                 else:
                     yield (rk, v), ref
             elif rk == REF_XMLID:
-                yield (rk, qualify(ref[1], module)), ref
+                yield (rk, qualify(ref[R_VALUE], module)), ref
             elif rk == REF_MODEL or rk == REF_QWEB or rk == REF_MODULE:
-                yield (rk, ref[1]), ref
+                yield (rk, ref[R_VALUE]), ref
 
     def _add_file(self, path: str, facts: dict) -> None:
         kind = facts.get(KIND)
@@ -615,11 +643,11 @@ class Registry:
                         self._framework[cls[K_NAME]] = ref
                         classes.append(ref)
                         for f in cls[K_FIELDS]:
-                            members[f[0]].add("")
+                            members[f[F_NAME]].add("")
                         for m in cls[K_METHODS]:
-                            members[m[0]].add("")
+                            members[m[M_NAME]].add("")
                         for a in cls[K_ATTRS]:
-                            members[a[0]].add("")
+                            members[a[A_NAME]].add("")
                     continue
                 model, is_def, parents = model_class_info(cls, major)
                 if not model:
@@ -631,11 +659,11 @@ class Registry:
                 for p in parents:
                     self._children[p].add(model)
                 for f in cls[K_FIELDS]:
-                    members[f[0]].add(model)
+                    members[f[F_NAME]].add(model)
                 for m in cls[K_METHODS]:
-                    members[m[0]].add(model)
+                    members[m[M_NAME]].add(model)
                 for a in cls[K_ATTRS]:
-                    members[a[0]].add(model)
+                    members[a[A_NAME]].add(model)
             dotted = self._dotted_for(path, module)
             if dotted:
                 self._py_modules[dotted] = path
@@ -643,22 +671,22 @@ class Registry:
         elif kind == KIND_XML or kind == KIND_CSV:
             qualify = self.qualify_xmlid
             for idx, rec in enumerate(facts.get(RECORDS) or ()):
-                xid = rec[0]
+                xid = rec[X_ID]
                 if not xid:
                     continue
-                if rec[2] == "qweb":
+                if rec[X_TAG] == "qweb":
                     r = RecordRef(xid, path, idx, module, rec)
-                    if (rec[7] or {}).get("mode") != "extension":  # an extension only patches its parent
+                    if (rec[X_INFO] or {}).get("mode") != "extension":  # an extension only patches its parent
                         self._templates[xid].append(r)
                     records.append(r)
-                    inherit = (rec[7] or {}).get("inherit")
+                    inherit = (rec[X_INFO] or {}).get("inherit")
                     if inherit:
                         self._view_children["qweb:" + inherit].append(r)
                     continue
                 r = RecordRef(qualify(xid, module), path, idx, module, rec)
                 self._xmlids[r.xmlid].append(r)
                 records.append(r)
-                parent = (rec[7] or {}).get("inherit_id")
+                parent = (rec[X_INFO] or {}).get("inherit_id")
                 if parent:
                     self._view_children[qualify(parent, module)].append(r)
         refs = self._refs
@@ -691,12 +719,12 @@ class Registry:
                     kids.discard(ref.model)
         for ref in classes:
             remaining = self._model_classes.get(ref.model, ()) if ref.model else self._framework.values()
-            names = [f[0] for f in ref.facts[K_FIELDS]] + [m[0] for m in ref.facts[K_METHODS]] + [a[0] for a in ref.facts[K_ATTRS]]
+            names = [f[F_NAME] for f in ref.facts[K_FIELDS]] + [m[M_NAME] for m in ref.facts[K_METHODS]] + [a[A_NAME] for a in ref.facts[K_ATTRS]]
             for name in names:
                 if not any(
-                    any(x[0] == name for x in c.facts[K_FIELDS])
-                    or any(x[0] == name for x in c.facts[K_METHODS])
-                    or any(x[0] == name for x in c.facts[K_ATTRS])
+                    any(x[F_NAME] == name for x in c.facts[K_FIELDS])
+                    or any(x[M_NAME] == name for x in c.facts[K_METHODS])
+                    or any(x[A_NAME] == name for x in c.facts[K_ATTRS])
                     for c in remaining
                 ):
                     bucket = self._members.get(name)
@@ -704,8 +732,8 @@ class Registry:
                         bucket.discard(ref.model)
         for r in records:
             rec = r.facts
-            info = rec[7] or {}
-            if rec[2] == "qweb":
+            info = rec[X_INFO] or {}
+            if rec[X_TAG] == "qweb":
                 buckets = [self._templates.get(r.xmlid)]
                 if info.get("inherit"):
                     buckets.append(self._view_children.get("qweb:" + info["inherit"]))
@@ -1008,7 +1036,7 @@ class Registry:
         idx = {"field": K_FIELDS, "method": K_METHODS, "attr": K_ATTRS}[which]
         for c in self.model_mro(model, scope):
             for m in c.facts[idx]:
-                out.setdefault(m[0], []).append(MemberDef(which, m[0], c, m))
+                out.setdefault(m[F_NAME], []).append(MemberDef(which, m[F_NAME], c, m))
         if which == "field":
             self._add_magic_fields(model, scope, out)
             for parent, m2o in self.model_inherits(model, scope).items():
@@ -1017,8 +1045,8 @@ class Registry:
                 if m2o not in out and (self._major or 0) < 19:  # 16-18 create the _inherits many2one automatically
                     owner = self._class_declaring(model, scope, "_inherits")
                     if owner is not None:
-                        a = next((x for x in owner.facts[K_ATTRS] if x[0] == "_inherits"), None)
-                        pos = (a[1], a[2], a[3]) if a else (owner.facts[1], owner.facts[2], owner.facts[3])
+                        a = next((x for x in owner.facts[K_ATTRS] if x[A_NAME] == "_inherits"), None)
+                        pos = (a[A_LINE], a[A_COL], a[A_END_COL]) if a else (owner.facts[K_LINE], owner.facts[K_COL], owner.facts[K_END_COL])
                         args = {"comodel_name": parent, "required": True, "ondelete": "cascade", "string": f"Automatically created field to link to parent {parent}"}
                         out[m2o] = [MemberDef("field", m2o, owner, (m2o, pos[0], pos[1], pos[2], pos[0], "Many2one", parent, args))]
                 for name, defs in self._members_of(parent, scope, "field").items():
@@ -1035,8 +1063,12 @@ class Registry:
         return None
 
     def _log_access(self, model: str, scope: frozenset[str] | None) -> bool:
-        """``_log_access`` (default: ``_auto``) as set by the model's OWN classes -
-        Odoo ignores the values of mixins/parents for these attributes."""
+        """``_log_access`` (else ``_auto``) as set by the model's OWN classes -
+        Odoo ignores the values of mixins/parents for these attributes. When
+        neither is set this returns True, also for abstract models (where Odoo
+        adds no log-access fields): the magic fields stay visible on mixins so
+        that ``self.create_uid`` in mixin code navigates and hovers. Diagnostics
+        applies Odoo's own default instead."""
         auto = None
         for c in reversed(self.model_classes(model, scope)):
             attrs = c.model_info.get(MI_ATTRS) or {}
@@ -1053,10 +1085,10 @@ class Registry:
         anchor = base
         meta_pos = self._cache.get("metamodel_pos")
         if meta_pos is None:
-            meta_pos = (base.facts[1], base.facts[2], base.facts[3])
+            meta_pos = (base.facts[K_LINE], base.facts[K_COL], base.facts[K_END_COL])
             for cls in (self.files.get(base.path) or {}).get(CLASSES) or ():
                 if cls[K_NAME] == "MetaModel":
-                    meta_pos = (cls[1], cls[2], cls[3])
+                    meta_pos = (cls[K_LINE], cls[K_COL], cls[K_END_COL])
                     break
             self._cache["metamodel_pos"] = meta_pos
         magic_pos = self._cache.get("magic_pos")
@@ -1066,14 +1098,14 @@ class Registry:
         for name, (ftype, comodel, args) in MAGIC_FIELDS.items():
             if name in out:
                 continue
-            if name == "__last_update" and self._major != 16:
+            if name == "__last_update" and self._major is not None and self._major >= 17:
                 continue
             if name in LOG_ACCESS_FIELDS:
                 if log_access is None:
                     log_access = self._log_access(model, scope)
                 if not log_access:
                     continue
-            pos = magic_pos.get(name) or (meta_pos if name not in ("id", "display_name") or (self._major or 0) < 19 else (base.facts[1], base.facts[2], base.facts[3]))
+            pos = magic_pos.get(name) or (meta_pos if name not in ("id", "display_name") or (self._major or 0) < 19 else (base.facts[K_LINE], base.facts[K_COL], base.facts[K_END_COL]))
             fargs = dict(args, automatic=True)
             if comodel:
                 fargs["comodel_name"] = comodel
@@ -1189,7 +1221,7 @@ class Registry:
             for model in self._implicit_index().get(local[6:], ()):
                 for c in self._sorted_classes(model):
                     if c.module == module:
-                        facts = (local, "ir.model", "implicit", c.facts[1], c.facts[2], c.facts[3], c.facts[4], {"model": model})
+                        facts = (local, "ir.model", "implicit", c.facts[K_LINE], c.facts[K_COL], c.facts[K_END_COL], c.facts[K_END_LINE], {"model": model})
                         out.append(RecordRef(xmlid, c.path, -1, module, facts))
                         break
         elif local.startswith("field_") and "__" in local:
@@ -1200,7 +1232,7 @@ class Registry:
                         continue
                     for f in c.facts[K_FIELDS]:
                         if f[F_NAME] == fname:
-                            facts = (local, "ir.model.fields", "implicit", f[1], f[2], f[3], f[4], {"model": model, "field": fname})
+                            facts = (local, "ir.model.fields", "implicit", f[F_LINE], f[F_COL], f[F_END_COL], f[F_END_LINE], {"model": model, "field": fname})
                             out.append(RecordRef(xmlid, c.path, -1, module, facts))
         return out
 

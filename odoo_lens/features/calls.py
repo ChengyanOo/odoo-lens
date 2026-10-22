@@ -2,15 +2,18 @@
 
 * ``prepare``: one item - Claude Code only uses the first - for the method under
   the cursor resolved to the definition that runs (``super()``: the one it
-  reaches), else for the function enclosing the cursor. ``data`` carries
-  ``{"model", "name"}`` for the follow-up requests.
+  reaches), else for the function enclosing the cursor; an item built on an
+  uninferred receiver says so in its detail (with the candidate models).
+  ``data`` carries ``{"model", "name"}`` for the follow-up requests.
 * ``incoming``: Python call sites (``x.m(...)`` / ``super().m(...)``) whose
   receiver is compatible with the item's model (inheritance either way; unknown
-  receivers only for names defined on very few models), grouped by enclosing
-  function; then XML buttons, ``<function>`` calls, JS ``orm.call`` and field
-  arguments naming the method (``compute=``, ``inverse=``...). Only files of
-  modules that can see the model are scanned (its defining modules and their
-  dependents), customer code first and tests last, within a time box.
+  receivers only as ``navigation.trust_unknown_receiver`` allows, like
+  findReferences), grouped by enclosing function; then XML buttons,
+  ``<function>`` calls, server action / cron ``code``, JS ``orm.call`` and
+  field arguments naming the method (``compute=``, ``inverse=``,
+  ``compute_sql=``...). Only files of modules that can see the model are
+  scanned (its defining modules and their dependents), customer code first,
+  tests and never-loaded scripts (migrations...) last, within a time box.
 * ``outgoing``: the calls made by the item's function, each resolved to the
   method definition it runs (``super()`` -> the next definition below in the
   MRO); unresolved calls are left out.
@@ -28,9 +31,31 @@ from ..analysis.python import calls_in_function, enclosing_function, member_usag
 from ..analysis.targets import METHOD, Target
 from ..analysis.xml import arch_ref_model
 from ..documents import lsp_range, uri_to_path, utf16_len, utf16_to_index
-from ..facts import CLASSES, F_END_LINE, F_LINE, F_NAME, K_FIELDS, K_MODEL, M_COL, M_END_COL, M_END_LINE, M_LINE, REF_METHOD, S_KIND, S_LINE, S_NAME, SYMBOLS, X_END_LINE
+from ..facts import (
+    CLASSES,
+    F_COL,
+    F_END_COL,
+    F_END_LINE,
+    F_LINE,
+    F_NAME,
+    K_FIELDS,
+    K_MODEL,
+    K_NAME,
+    M_COL,
+    M_END_COL,
+    M_END_LINE,
+    M_LINE,
+    REF_METHOD,
+    S_COL,
+    S_END_COL,
+    S_KIND,
+    S_LINE,
+    S_NAME,
+    SYMBOLS,
+    X_END_LINE,
+)
 from ..registry import UNLOADED_DIRS, MemberDef, RefHit
-from .navigation import class_containing, scoped_lookup, super_definitions
+from .navigation import candidate_models, class_containing, scoped_lookup, super_definitions, trust_unknown_receiver
 
 # LSP SymbolKind
 KIND_FILE = 1
@@ -43,11 +68,13 @@ KIND_OBJECT = 19
 
 MAX_CALLS = 100
 TIME_BOX = 3.0  # seconds spent scanning Python files for incoming calls
-FEW_MODELS = 3  # unknown receivers are trusted when the name exists on at most that many models
 MAX_RECEIVERS = 3
 SUPER_RE = re.compile(r"super\s*\([^()]*\)\s*\.\s*$")
 # method references of these roles are calls made by the framework
-CALLER_ROLES = frozenset({"compute", "inverse", "search", "default", "selection", "group_expand", "button", "function", "js"})
+CALLER_ROLES = frozenset({"compute", "inverse", "search", "default", "selection", "group_expand", "compute_sql", "button", "function", "js", "code"})
+# roles whose ctx holds a record index: the owner model is resolved from the record
+RECORD_ROLES = frozenset({"button", "code"})
+CODE_DETAILS = {"ir.cron": "cron code", "ir.actions.server": "server action code"}
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +85,18 @@ def prepare(ctx: Any) -> list[dict]:
     for target in targets_at(ctx):
         if target.kind != METHOD:
             continue
-        model = target.model or (target.models[0] if target.models else None)
-        if not model:
+        models = candidate_models(target)
+        if not models:
             continue
+        model = models[0]
         d = _target_definition(ctx, target, model)
         if d is not None:
-            return [method_item(ctx, model, d)]
+            item = method_item(ctx, model, d)
+            if target.model is None or target.extra.get("guess"):
+                # Claude reads one item: keep the best candidate, but say it is one
+                note = f"receiver not inferred (candidates: {', '.join(models)})"
+                item["detail"] = f"{item['detail']} · {note}" if item["detail"] else note
+            return [item]
     if ctx.kind != "py":
         return []
     enc = enclosing_function(ctx.registry, ctx.path, ctx.source, ctx.line)
@@ -157,7 +190,7 @@ def incoming(ctx: Any, item: dict) -> list[dict]:
 
 def _receiver_filter(registry: Any, model: str, name: str) -> Callable[[Any], bool]:
     """Whether a call on receivers of the given models may reach ``model.name``."""
-    few = len([m for m in registry.models_with_member(name) if m]) <= FEW_MODELS
+    few = trust_unknown_receiver(registry, name)
 
     def accepts(receivers: Any) -> bool:
         if not receivers:
@@ -229,16 +262,19 @@ def _super_reaches(ctx: Any, receivers: Any, path: str, line: int) -> bool:
 
 
 def _ref_callers(ctx: Any, model: str, name: str, accepts: Callable) -> list[dict]:
-    """XML buttons, ``<function>`` calls, JS ``orm.call``s and field arguments
-    (``compute=``, ``inverse=``...) naming the method."""
+    """XML buttons, ``<function>`` calls, server action / cron ``code``, JS
+    ``orm.call``s and field arguments (``compute=``, ``inverse=``...) naming
+    the method."""
     registry = ctx.registry
     entries: dict[tuple, dict] = {}
     for hit in registry.refs_by_name(REF_METHOD, name):
         role = hit.ctx[0] if hit.ctx else None
         if hit.value != name or role not in CALLER_ROLES:
             continue
-        if role == "button":
+        if role in RECORD_ROLES:
             owner = arch_ref_model(registry, hit.path, registry.file_facts(hit.path) or {}, hit.facts)
+            if owner is None and role == "code":
+                continue  # record without a known model (as findReferences)
         else:
             owner = hit.ctx[1] if len(hit.ctx) > 1 else None
         if not accepts([owner] if owner else None):
@@ -255,25 +291,26 @@ def _ref_caller(ctx: Any, hit: RefHit, owner: str | None) -> tuple[tuple, Callab
     registry = ctx.registry
     path, role = hit.path, hit.ctx[0]
     facts = registry.file_facts(path) or {}
-    if role == "button":
+    if role in RECORD_ROLES:
         rec = registry.record_at(path, hit.ctx[1])
         if rec is not None:
             end = rec.facts[X_END_LINE] or rec.line
             label = rec.xmlid or os.path.basename(path)
-            return (path, rec.line), lambda: _item(ctx, label, KIND_OBJECT, path, rec.line, rec.col, rec.end_col, end, "view button", {"xmlid": rec.xmlid})
+            detail = "view button" if role == "button" else CODE_DETAILS.get(rec.model or "", "record code")
+            return (path, rec.line), lambda: _item(ctx, label, KIND_OBJECT, path, rec.line, rec.col, rec.end_col, end, detail, {"xmlid": rec.xmlid})
     elif role == "js":
         sym = _js_symbol_before(facts, hit.line)
         if sym is not None:
             kind = KIND_CLASS if sym[S_KIND] == "class" else KIND_FUNCTION if sym[S_KIND] == "def" else KIND_VARIABLE
-            return (path, sym[S_LINE]), lambda: _item(ctx, sym[S_NAME], kind, path, sym[S_LINE], sym[3], sym[4], sym[S_LINE], "orm call", {"name": sym[S_NAME]})
+            return (path, sym[S_LINE]), lambda: _item(ctx, sym[S_NAME], kind, path, sym[S_LINE], sym[S_COL], sym[S_END_COL], sym[S_LINE], "orm call", {"name": sym[S_NAME]})
     elif role != "function":
         for cls in facts.get(CLASSES) or ():
             if not cls[K_MODEL]:
                 continue
             for f in cls[K_FIELDS]:
                 if f[F_LINE] <= hit.line <= f[F_END_LINE]:
-                    label = f"{owner or cls[0]}.{f[F_NAME]}"
-                    return (path, f[F_LINE]), lambda: _item(ctx, label, KIND_FIELD, path, f[F_LINE], f[2], f[3], f[F_END_LINE], f"{role}=", {"model": owner, "field": f[F_NAME]})
+                    label = f"{owner or cls[K_NAME]}.{f[F_NAME]}"
+                    return (path, f[F_LINE]), lambda: _item(ctx, label, KIND_FIELD, path, f[F_LINE], f[F_COL], f[F_END_COL], f[F_END_LINE], f"{role}=", {"model": owner, "field": f[F_NAME]})
     label = f"<function> {owner}.{hit.value}" if role == "function" else None
     return (path, hit.line), lambda: _file_item(ctx, path, hit.line, hit.col, hit.end_col, label, KIND_FUNCTION if label else KIND_FILE)
 

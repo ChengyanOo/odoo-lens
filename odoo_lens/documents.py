@@ -1,9 +1,12 @@
 """Open documents, file:// URIs and position-encoding helpers.
 
 Columns everywhere inside odoo-lens (facts, registry, features) are **UTF-16 code
-units**, the LSP default. Lines are 0-based. Python's ``ast`` reports UTF-8 byte
-columns and must be converted with :func:`bytecol_to_utf16`; on ASCII lines (the
-vast majority) every conversion is the identity.
+units**, the LSP default. Lines are 0-based. Python's ``ast`` and the regex
+scanners report UTF-8 byte columns / offsets. Extractors (and the registry)
+convert them with :class:`odoo_lens.extract.common.SrcIndex` (whole-source byte
+offsets and per-line byte columns); a single line is converted with
+:func:`bytecol_to_utf16`. On ASCII lines (the vast majority) every conversion is
+the identity.
 """
 
 from __future__ import annotations

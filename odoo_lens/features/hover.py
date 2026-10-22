@@ -57,11 +57,14 @@ from ..facts import (
     S_NAME,
     SYMBOLS,
     X_END_LINE,
+    X_ID,
     X_LINE,
     X_MODEL,
+    X_TAG,
 )
 from ..registry import MemberDef, RecordRef
 from .navigation import (
+    MEMBER_NAME,
     absolute_module,
     candidate_models,
     field_comodel,
@@ -93,6 +96,7 @@ METHOD_NAME_ARGS = frozenset({"compute", "inverse", "search", "group_expand", "c
 SILENT_ARGS = frozenset({"comodel_name", "automatic"})
 VIEW_TYPE_RE = re.compile(r"<\s*([A-Za-z_][\w\-]*)")
 ARCH_RE = re.compile(r"""<field\b[^>]*\bname\s*=\s*["']arch(?:_db)?["']""")
+JS_DECL_RE = re.compile(r"""\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(class|function|const|let|var)\b\s*\*?\s*([A-Za-z_$][\w$]*)""")
 
 
 def hover(ctx: Any) -> dict | None:
@@ -117,7 +121,8 @@ def hover_for_target(ctx: Any, target: Target) -> str | None:
     if guess:
         card = _member_card(ctx, target)
         how = "the other members used on it" if guess == "duck-typing" else "the member name"
-        note = f"*Receiver type not inferred: `{target.model}` guessed from {how}.*"
+        what = "View model" if (getattr(ctx, "path", "") or "").endswith(".xml") else "Receiver type"
+        note = f"*{what} not inferred: `{target.model}` guessed from {how}.*"
         return f"{note}\n\n{card}" if card else None
     return _member_card(ctx, target) if kind in (FIELD, METHOD, ATTR) else _other_card(ctx, target)
 
@@ -227,7 +232,8 @@ def _outside_overrides(registry: Any, model: str, name: str, scope: frozenset[st
     installed."""
     if scope is None:
         return []
-    return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) if c.module not in scope for m in c.facts[index] if m[0] == name]
+    key = MEMBER_NAME[index]
+    return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) if c.module not in scope for m in c.facts[index] if m[key] == name]
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +479,7 @@ def method_card(ctx: Any, model: str | None, name: str, target: Target | None = 
                 entry += " *(not a dependency)*"
             out.append(f"{i}. {entry}")
         if len(full) > MAX_FULL_CHAIN:
-            out.append(f"… +{len(full) - MAX_FULL_CHAIN} more (goToImplementation lists every override, in load order)")
+            out.append(f"… +{len(full) - MAX_FULL_CHAIN} more (goToImplementation lists every override)")
     elif outside:
         out.append(f"+{len(outside)} override(s) outside this module's dependencies (only when installed): {_more(_modules_of(outside), MAX_LIST)}")
     return "\n".join(out)
@@ -636,7 +642,7 @@ def _access_lines(ctx: Any, model: str) -> list[str]:
         elif h.path.endswith(".xml"):
             rec = _record_around(registry, h.path, h.line)
             if rec is not None and rec[X_MODEL] in ("ir.rule", "ir.access"):
-                rules.append((key, f"`{rec[0]}` ({_mod(h.module)}){mark}"))
+                rules.append((key, f"`{rec[X_ID]}` ({_mod(h.module)}){mark}"))
     rows = [r for _k, r in sorted(rows)]  # type: ignore[assignment]
     rules = [r for _k, r in sorted(rules)]  # type: ignore[assignment]
     out = []
@@ -767,9 +773,10 @@ def _view_lines(ctx: Any, rec: RecordRef) -> list[str]:
 
 
 def _view_type(ctx: Any, rec: RecordRef, depth: int) -> str | None:
-    """View type: the arch root tag, or the parent's type for extension views."""
+    """View type: the ``type`` field (``qweb`` for templates), else the arch
+    root tag, or the parent's type for extension views."""
     info = rec.info
-    vtype = info.get("type") or info.get("view_type")
+    vtype = info.get("view_type") or info.get("type")
     if vtype:
         return vtype
     lines = ctx.server.documents.lines(rec.path) or []
@@ -885,7 +892,7 @@ def file_card(ctx: Any, path: str) -> str | None:
         return "\n".join(out)
     facts = registry.file_facts(path) or {}
     if facts.get(KIND) in (KIND_XML, KIND_CSV):
-        counts = Counter(rec[X_MODEL] or rec[2] for rec in facts.get(RECORDS) or ())
+        counts = Counter(rec[X_MODEL] or rec[X_TAG] for rec in facts.get(RECORDS) or ())
         if counts:
             out.append(f"{sum(counts.values())} record(s): " + _more([f"{m} ×{n}" for m, n in counts.most_common()], 8))
     return "\n".join(out)
@@ -898,6 +905,8 @@ def pysym_card(ctx: Any, target: Target) -> str | None:
     lines = ctx.server.documents.lines(path) or []
     if not 0 <= target.line < len(lines):
         return None
+    if path.endswith(".js"):
+        return _js_symbol_card(ctx, target, lines)
     dotted = ctx.registry.py_dotted_name(path)
     where = f"{dotted + ' — ' if dotted else ''}{_at(path, target.line)}"
     if target.name and not re.match(rf"\s*(?:async\s+def|def|class)\s+{re.escape(target.name)}\b", lines[target.line]):
@@ -915,6 +924,73 @@ def pysym_card(ctx: Any, target: Target) -> str | None:
         out.append(f"*{_clip(doc, 200)}*")
     out.append(where)
     return "\n".join(out)
+
+
+def _js_symbol_card(ctx: Any, target: Target, lines: list[str]) -> str:
+    """Card of a JS symbol: its declaration header (or the line exporting it),
+    the first line of its JSDoc and its ``@module/path`` specifier."""
+    path, line = target.path or "", target.line
+    spec = _js_module(ctx.registry, path)
+    where = f"{spec + ' — ' if spec else ''}{_at(path, line)}"
+    m = JS_DECL_RE.match(lines[line])
+    if m is None or (m.group(2) != target.name and target.name != "default"):
+        label = f"`{target.name}`" if target.name != "default" else f"`{target.extra.get('local') or 'default'}` (default export)"
+        return "\n".join([label, "```js", lines[line].strip(), "```", where])
+    out = ["```js", _js_signature(lines, line, m.group(1)), "```"]
+    doc = _jsdoc(lines, line)
+    if doc:
+        out.append(f"*{_clip(doc, 200)}*")
+    out.append(where)
+    return "\n".join(out)
+
+
+def _js_signature(lines: list[str], line: int, keyword: str) -> str:
+    """Declaration header at ``line``: a function up to its parameter list, a
+    class up to its body, other declarations as their first line."""
+    first = lines[line].rstrip()
+    if keyword == "class":
+        return textwrap.dedent(first.split("{", 1)[0].rstrip())
+    if keyword != "function":
+        return textwrap.dedent(first)
+    text = "\n".join(l.rstrip() for l in lines[line : line + 4])
+    start = text.find("(")
+    depth = 0
+    for i in range(max(start, 0), len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return textwrap.dedent(text[: i + 1])
+    return textwrap.dedent(first)
+
+
+def _jsdoc(lines: list[str], line: int) -> str | None:
+    """First text line of the ``/** ... */`` block right above ``line``."""
+    if line == 0 or not lines[line - 1].strip().endswith("*/"):
+        return None
+    for start in range(line - 1, max(-1, line - 40), -1):
+        if "/*" in lines[start]:  # the comment's opening line
+            if "/**" not in lines[start]:
+                return None  # a plain block comment, not a JSDoc
+            for text in lines[start:line]:
+                text = text.strip().removeprefix("/**").removesuffix("*/").strip().lstrip("*").strip()
+                if text and not text.startswith("@"):
+                    return text
+            return None
+    return None
+
+
+def _js_module(registry: Any, path: str) -> str | None:
+    """``@module/path`` specifier of a file under ``static/src``."""
+    module = registry.module_of_path(path)
+    info = registry.module(module)
+    if info is None:
+        return None
+    rel = os.path.relpath(path, info.path).replace(os.sep, "/")
+    if not rel.startswith("static/src/"):
+        return None
+    return f"@{module}/{rel[len('static/src/') :].removesuffix('.js')}"
 
 
 def _signature(lines: list[str], line: int) -> str:

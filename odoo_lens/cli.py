@@ -6,10 +6,12 @@
                                       build the index of PATH's env and print timings
     odoo-lens query OP FILE LINE COL  run a feature at a 1-based position, e.g.
                                       odoo-lens query definition sale_order.py 120 18
-                                      OP: definition|references|hover|implementation|typedef|symbols|calls-in|calls-out
-    odoo-lens symbols QUERY [--path P]
+                                      OP: definition|references|hover|implementation|typedef|symbols|calls-in|calls-out|targets
+                                      (targets: the raw cursor analysis, for debugging)
+    odoo-lens symbols QUERY [--path P] [--limit N]
                                       workspace symbol search in P's env (default: cwd)
-    odoo-lens check PATH...           print diagnostics for files / directories (exit 1 if errors)
+    odoo-lens check PATH...           print diagnostics for files / directories, each checked
+                                      against its own Odoo env (exit 1 if errors)
     odoo-lens session-hint [DIR]      SessionStart hook: a short note for Claude when DIR (default:
                                       $CLAUDE_PROJECT_DIR or cwd) holds Odoo code, else nothing
 """
@@ -68,8 +70,6 @@ def headless_server():
 
 def load_env(server: Any, path: str, workers: int | None = None, use_cache: bool = True):
     """Discover and synchronously index the env of ``path``. Returns (env, stats)."""
-    from .indexer import build_index
-
     if not use_cache:
         os.environ["ODOO_LENS_NO_CACHE"] = "1"
     path = os.path.abspath(path)
@@ -79,11 +79,18 @@ def load_env(server: Any, path: str, workers: int | None = None, use_cache: bool
         env = envs[0] if envs else None
     if env is None:
         return None, None
+    return env, index_env(env, workers)
+
+
+def index_env(env: Any, workers: int | None = None):
+    """Synchronously build and publish the registry of ``env``. Returns the stats."""
+    from .indexer import build_index
+
     registry, stats = build_index(env, workers=workers, wait_for_cache_write=True)
     env.registry = registry
     env.ready.set()
     env.last_used = time.monotonic()
-    return env, stats
+    return stats
 
 
 def _ctx(server: Any, env: Any, path: str, line1: int, col1: int):
@@ -175,6 +182,9 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+QUERY_OPS = ("definition", "references", "hover", "implementation", "typedef", "symbols", "calls-in", "calls-out", "targets")
+
+
 def cmd_query(args: argparse.Namespace) -> int:
     from . import features
 
@@ -200,10 +210,17 @@ def cmd_query(args: argparse.Namespace) -> int:
     elif op == "symbols":
         res = features.document_symbols(ctx, True)
     elif op in ("calls-in", "calls-out"):
-        items = features.prepare_call_hierarchy(ctx)
+        from .documents import uri_to_path
+        from .server import RequestContext
+
+        calls = features.incoming_calls if op == "calls-in" else features.outgoing_calls
         res = []
-        for item in items or []:
-            res += (features.incoming_calls if op == "calls-in" else features.outgoing_calls)(ctx, item)
+        for item in features.prepare_call_hierarchy(ctx) or []:
+            # like the server (_item_context): the context sits on the item, not on the
+            # cursor; selectionRange is already 0-based UTF-16
+            sel = (item.get("selectionRange") or item.get("range") or {}).get("start") or {}
+            ictx = RequestContext(server, env, env.registry, uri_to_path(item["uri"]), sel.get("line", 0), sel.get("character", 0))
+            res += calls(ictx, item) or []
     elif op == "targets":
         from .analysis import targets_at
 
@@ -229,14 +246,21 @@ def cmd_symbols(args: argparse.Namespace) -> int:
     t = time.perf_counter()
     res = features.workspace_symbols(server, env, env.registry, args.query, NEVER_CANCELLED)
     dt = time.perf_counter() - t
-    _print(res[: args.limit], args.json)
+    # the server already caps the answer and ends a cut one with a "not listed" marker
+    shown = res if args.limit is None else res[: max(0, args.limit)]
+    _print(shown, args.json)
+    if len(shown) < len(res):
+        # stderr in --json mode, to keep stdout valid JSON
+        print(f"({len(res) - len(shown)} more results not shown; raise --limit)", file=sys.stderr if args.json else sys.stdout)
     print(f"({len(res)} results, {dt * 1000:.1f} ms)", file=sys.stderr)
     return 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    import gc
+
     from . import features
-    from .server import RequestContext
+    from .server import RequestContext, _purge_caches
 
     server = headless_server()
     targets: list[str] = []
@@ -250,31 +274,55 @@ def cmd_check(args: argparse.Namespace) -> int:
             targets.append(p)
     if not targets:
         return 0
-    env, _ = load_env(server, targets[0], args.workers)
-    if env is None:
+    # each file is checked against its own env: a folder may hold modules of several
+    # addons roots or Odoo versions
+    groups: dict[str, tuple[Any, list[str]]] = {}
+    unresolved: list[str] = []
+    for path in sorted(set(targets)):
+        env = server.envs.env_for_path(path)
+        if env is None:
+            unresolved.append(path)
+        else:
+            groups.setdefault(env.key, (env, []))[1].append(path)
+    for path in unresolved:  # retry: an env discovered later (from a module file) may contain it
+        env = server.envs.env_for_path(path)
+        if env is None:
+            print(f"skipped (no Odoo env): {path}", file=sys.stderr)
+        else:
+            groups.setdefault(env.key, (env, []))[1].append(path)
+    if not groups:
         print("no Odoo environment detected", file=sys.stderr)
         return 1
     sev_names = {1: "error", 2: "warning", 3: "info", 4: "hint"}
     n_err = 0
     n_total = 0
-    for path in sorted(targets):
-        e = server.envs.env_for_path(path)
-        if e is not env:
-            continue
-        ctx = RequestContext(server, env, env.registry, path)
-        if ctx.kind is None:
-            continue
-        for d in features.diagnostics(ctx):
-            s = d["range"]["start"]
-            sev = d.get("severity", 1)
-            n_total += 1
-            n_err += sev == 1
-            if args.json:
-                print(json.dumps({"path": path, **d}, ensure_ascii=False))
-            else:
-                code = f" [{d['code']}]" if d.get("code") else ""
-                print(f"{path}:{s['line'] + 1}:{s['character'] + 1}: {sev_names.get(sev, sev)}{code}: {d['message']}")
-    print(f"{n_total} diagnostics ({n_err} errors) in {len(targets)} files", file=sys.stderr)
+    n_files = 0
+    for env, paths in groups.values():
+        index_env(env, args.workers)
+        for path in sorted(paths):
+            ctx = RequestContext(server, env, env.registry, path)
+            if ctx.kind is None:
+                continue
+            n_files += 1
+            for d in features.diagnostics(ctx):
+                s = d["range"]["start"]
+                sev = d.get("severity", 1)
+                n_total += 1
+                n_err += sev == 1
+                if args.json:
+                    print(json.dumps({"path": path, **d}, ensure_ascii=False))
+                else:
+                    code = f" [{d['code']}]" if d.get("code") else ""
+                    print(f"{path}:{s['line'] + 1}:{s['character'] + 1}: {sev_names.get(sev, sev)}{code}: {d['message']}")
+        if len(groups) > 1:
+            # one registry in memory at a time, released like server._evict_envs does: the
+            # analysis caches still reference it and build_index gc.freeze()s it
+            ctx = None
+            env.registry = None
+            env.ready.clear()
+            _purge_caches()
+            gc.unfreeze()  # the next build_index's gc.collect() reclaims it
+    print(f"{n_total} diagnostics ({n_err} errors) in {n_files} files", file=sys.stderr)
     return 1 if n_err else 0
 
 
@@ -344,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int)
     p.set_defaults(func=cmd_index)
     p = sub.add_parser("query", help="run a feature at FILE:LINE:COL (1-based)")
-    p.add_argument("op")
+    p.add_argument("op", choices=QUERY_OPS)
     p.add_argument("file")
     p.add_argument("line", type=int)
     p.add_argument("col", type=int)
@@ -354,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("symbols", help="workspace symbol search")
     p.add_argument("query")
     p.add_argument("--path")
-    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--limit", type=int, help="print at most N results (default: the whole answer)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--workers", type=int)
     p.set_defaults(func=cmd_symbols)

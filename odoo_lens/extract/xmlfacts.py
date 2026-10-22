@@ -25,7 +25,12 @@ from ..facts import (
     REF_XMLID,
     REFS,
     ROOT,
+    X_COL,
+    X_END_COL,
     X_END_LINE,
+    X_INFO,
+    X_LINE,
+    X_MODEL,
 )
 from .common import SrcIndex
 
@@ -339,30 +344,30 @@ class _XmlExtractor:
                 end = start + len(value.encode())
                 name = f.capture
                 if name in MODEL_TEXT_FIELDS and (
-                    MODEL_RE.match(value) or (name == "model" and rec[1] == "ir.ui.view" and VIEW_MODEL_RE.match(value))
+                    MODEL_RE.match(value) or (name == "model" and rec[X_MODEL] == "ir.ui.view" and VIEW_MODEL_RE.match(value))
                 ):
                     self.add_ref(REF_MODEL, value, start, end, ("field_model",))
-                    if name == "model" and rec[1] == "ir.ui.view":
-                        rec[7]["view_model"] = value
+                    if name == "model" and rec[X_MODEL] == "ir.ui.view":
+                        rec[X_INFO]["view_model"] = value
                     elif name in ("res_model", "model"):
-                        rec[7].setdefault("res_model", value)
+                        rec[X_INFO].setdefault("res_model", value)
                 elif name == "name":
-                    rec[7].setdefault("name", value[:200])
+                    rec[X_INFO].setdefault("name", value[:200])
                 elif name == "type":
-                    rec[7].setdefault("view_type", value)
+                    rec[X_INFO].setdefault("view_type", value)
                 elif name == "mode":
-                    rec[7]["mode"] = value
+                    rec[X_INFO]["mode"] = value
                 elif name == "priority":
                     try:
-                        rec[7]["priority"] = int(value)
+                        rec[X_INFO]["priority"] = int(value)
                     except ValueError:
                         pass
-                elif name in ("report_name", "report_file") and rec[1] == "ir.actions.report" and "." in value and " " not in value:
+                elif name in ("report_name", "report_file") and rec[X_MODEL] == "ir.actions.report" and "." in value and " " not in value:
                     # the QWeb template rendering the report (its key / xml id)
                     if name == "report_name":
                         self.add_ref(REF_XMLID, value, start, end, ("report",))
                 elif name == "key":
-                    rec[7]["key"] = value
+                    rec[X_INFO]["key"] = value
         if f.created and idx >= 0:
             self.records[f.rec][X_END_LINE] = self.s.pos(idx)[0]
 
@@ -386,19 +391,19 @@ class _XmlExtractor:
             if "ref" in a:
                 self.ref_attr(REF_XMLID, ts, te, "ref", a["ref"], ("ref",))
                 if name == "model_id":  # ir.rule / ir.cron / ir.actions.server / ir.access: their model
-                    rec[7]["model_id"] = a["ref"].strip()
+                    rec[X_INFO]["model_id"] = a["ref"].strip()
                 elif name == "binding_model_id":  # actions listed in the Action / Print menu of a model
-                    rec[7]["binding_model_id"] = a["ref"].strip()
+                    rec[X_INFO]["binding_model_id"] = a["ref"].strip()
                 if name == "inherit_id":
-                    rec[7]["inherit_id"] = a["ref"].strip()
-                elif name in ("parent_id",) and rec[1] == "ir.ui.menu":
-                    rec[7]["parent"] = a["ref"].strip()
-                elif name in ("action",) and rec[1] == "ir.ui.menu":
-                    rec[7]["action"] = a["ref"].strip()
+                    rec[X_INFO]["inherit_id"] = a["ref"].strip()
+                elif name in ("parent_id",) and rec[X_MODEL] == "ir.ui.menu":
+                    rec[X_INFO]["parent"] = a["ref"].strip()
+                elif name in ("action",) and rec[X_MODEL] == "ir.ui.menu":
+                    rec[X_INFO]["action"] = a["ref"].strip()
             if "eval" in a:
                 self.scan_attr(REF_CALL_RE, 2, REF_XMLID, ts, te, "eval", a["eval"], ("eval",))
                 if name == "priority" and a["eval"].strip().isdigit():
-                    rec[7]["priority"] = int(a["eval"].strip())
+                    rec[X_INFO]["priority"] = int(a["eval"].strip())
                 if name in ("domain_force", "domain"):
                     self.scan_attr(DOMAIN_LEAF_RE, 2, REF_FIELD, ts, te, "eval", a["eval"], ("record_domain", parent.rec))  # type: ignore[union-attr]
             if "model" in a:
@@ -406,7 +411,7 @@ class _XmlExtractor:
             if name in ("arch", "arch_db") and a.get("type") == "xml":
                 f.arch = True
                 f.arch_field = True
-                f.qweb = rec[7].get("view_type") == "qweb"
+                f.qweb = rec[X_INFO].get("view_type") == "qweb"
                 f.rec = parent.rec  # type: ignore[union-attr]
                 f.subpath = ()
                 return
@@ -439,7 +444,7 @@ class _XmlExtractor:
                 rec = self.records[f.rec]
                 span = self.attr_span(ts, te, "t-name")
                 if span:
-                    rec[3], rec[4], rec[5] = self.s.span(span[0], span[1])
+                    rec[X_LINE], rec[X_COL], rec[X_END_COL] = self.s.span(span[0], span[1])
             if "groups" in a:
                 self.ref_list_attr(REF_XMLID, ts, te, "groups", a["groups"], ("groups",))
             f.arch = True
@@ -516,7 +521,7 @@ class _XmlExtractor:
         else:
             f.subpath = sub
         if parent is not None and parent.arch_field and rec >= 0 and tag in SUBVIEW_TAGS:
-            self.records[rec][7].setdefault("type", tag)  # the arch root tag = view type
+            self.records[rec][X_INFO].setdefault("type", tag)  # the arch root tag = view type
         if f.attrs_spec:
             # children of position="attributes" are <attribute> values, not view nodes;
             # the expressions they set still name fields of the located element

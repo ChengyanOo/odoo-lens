@@ -101,7 +101,7 @@ def extract(path: str, src: bytes) -> dict:
             facts[MANIFEST_DEPENDS] = _strings(s, v)
             for name, l0, c0, c1 in facts[MANIFEST_DEPENDS]:
                 facts[REFS].append((REF_MODULE, name, l0, c0, c1, ("depends",)))
-            values[key] = [d[0] for d in facts[MANIFEST_DEPENDS]]
+            values[key] = [dep for dep, _l0, _c0, _c1 in facts[MANIFEST_DEPENDS]]
             continue
         if key in ("data", "demo", "init_xml", "update_xml", "demo_xml", "qweb"):
             entries = _strings(s, v)

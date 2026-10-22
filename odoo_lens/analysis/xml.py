@@ -62,16 +62,14 @@ from ..facts import (
     X_MODEL,
     X_TAG,
 )
-from ..registry import RecordRef
+from ..extract.xmlfacts import SUBVIEW_TAGS
+from ..registry import MAGIC_FIELDS, RecordRef
 from .targets import FIELD, METHOD, MODEL, TEMPLATE, XMLID, Target
 
 NEAR = 25  # max distance (UTF-16 columns) between the cursor and a token picked leniently
 ARCH_ROLES = frozenset({"arch", "label", "expr", "button"})
 # refs whose model comes from their record (ir.rule domains, cron code) or from a view
 MODEL_ROLES = frozenset({"record_domain", "code", "arch_domain"})
-SUBVIEW_TAGS = frozenset(
-    {"form", "list", "tree", "kanban", "graph", "pivot", "calendar", "gantt", "activity", "cohort", "map", "grid", "hierarchy", "search"}
-)
 MAX_NAME_CANDIDATES = 8  # name-based fallback when the view model is unknown
 _CHAIN_DEPTH = 12  # inherit_id hops followed
 _NESTING = 3  # parent refs resolved recursively (their own specs may need their parents)
@@ -276,6 +274,7 @@ def _member_targets(ctx: Any, facts: dict, ref: tuple) -> list[Target]:
             if len(models) > 1:
                 return [Target(FIELD if kind == REF_FIELD else METHOD, name=name, models=models, origin=origin, extra=extra)]
             model = models[0]
+            extra["guess"] = "member-name"
     else:
         model = arch_ref_model(registry, ctx.path, facts, ref)
         if model is None:
@@ -473,7 +472,9 @@ def _first_with_member(registry: Any, models: Iterable[str], name: str, kind: st
 
 def _name_candidates(registry: Any, name: str, kind: str, scope: frozenset | None) -> list[str]:
     """Models (in scope) having a member ``name``, when the view model is unknown."""
-    models = [m for m in registry.models_with_member(name) if m]
+    models = registry.models_with_member(name)
+    if name in MAGIC_FIELDS or "" in models:
+        return []  # a BaseModel member exists on every model: no basis to pick one
     if not models or len(models) > 4 * MAX_NAME_CANDIDATES:
         return []
     lookup = registry.method if kind == REF_METHOD else registry.field

@@ -26,7 +26,9 @@ from typing import Any, Callable, Iterable, Iterator
 from ..analysis import targets_at
 from ..analysis.targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID, Target
 from ..facts import (
+    A_NAME,
     CLASSES,
+    F_NAME,
     I_ASNAME,
     I_LEVEL,
     I_MODULE,
@@ -59,8 +61,13 @@ MAX_IMPLEMENTATIONS = 100
 MAX_CANDIDATE_MODELS = 8
 MAX_VIEW_DEPTH = 10
 MAX_SUBCLASS_DEPTH = 4
+# unknown receivers count as uses of a member only when this many models (at
+# most) define its name: with two or more, the use is a guess between them
+# (precision over recall: the strictest value)
+MAX_UNKNOWN_RECEIVER_MODELS = 1
 
 Spot = tuple  # (path, line, col, end_col) - a location before URI conversion
+MEMBER_NAME = {K_FIELDS: F_NAME, K_METHODS: M_NAME, K_ATTRS: A_NAME}  # name index of the member tuples of a class
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +155,15 @@ def candidate_models(target: Target) -> list[str]:
     if target.model:
         return [target.model]
     return list(dict.fromkeys(target.models or ()))[:MAX_CANDIDATE_MODELS]
+
+
+def trust_unknown_receiver(registry: Any, name: str) -> bool:
+    """Whether a use of member ``name`` on a receiver whose model is unknown
+    may count as a use of its definitions: never for members of the framework
+    classes, else only when at most ``MAX_UNKNOWN_RECEIVER_MODELS`` models
+    define the name. Shared by findReferences and incomingCalls."""
+    models = registry.models_with_member(name)
+    return "" not in models and len(models) <= MAX_UNKNOWN_RECEIVER_MODELS
 
 
 def scopes(scope: frozenset[str] | None) -> tuple:
@@ -340,7 +356,8 @@ def _implementation_spots(ctx: Any, target: Target) -> Iterator[Spot]:
 
 def _own_members(registry: Any, model: str, name: str, index: int, kind: str) -> list[MemberDef]:
     """Definitions of ``name`` in the classes of ``model`` itself (all modules, load order)."""
-    return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) for m in c.facts[index] if m[0] == name]
+    key = MEMBER_NAME[index]
+    return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) for m in c.facts[index] if m[key] == name]
 
 
 def descendants(registry: Any, model: str) -> set[str]:
@@ -364,12 +381,13 @@ def _descendant_members(registry: Any, model: str, name: str, index: int, kind: 
     if not candidates:
         return []
     inheriting = descendants(registry, model)
+    key = MEMBER_NAME[index]
     out = []
     for m in candidates:
         classes = registry.model_classes(m)
         if m not in inheriting and not (delegation and any(model in (c.model_info.get(MI_INHERITS) or {}) for c in classes)):
             continue
-        out.extend(MemberDef(kind, name, c, x) for c in classes for x in c.facts[index] if x[0] == name)
+        out.extend(MemberDef(kind, name, c, x) for c in classes for x in c.facts[index] if x[key] == name)
     out.sort(key=lambda d: (d.cls.rank, d.path, d.line))
     return out
 

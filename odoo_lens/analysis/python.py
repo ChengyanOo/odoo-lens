@@ -91,7 +91,8 @@ from ..facts import (
     S_NAME,
     SYMBOLS,
 )
-from ..extract.pyfacts import parse_tolerant
+from ..documents import bytecol_to_utf16
+from ..extract.pyfacts import FRAMEWORK_CLASSES, MODEL_BASES, parse_tolerant
 from ..registry import MAGIC_FIELDS, model_class_info
 from .targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID, Target
 
@@ -167,10 +168,9 @@ FILL_METHODS = frozenset({"append", "add", "extend", "insert"})
 VALS_PARAMS = {"create": 1, "write": 1, "copy": 1, "copy_data": 1, "new": 1, "update": 1, "_add_missing_default_values": 1}
 ENV_MODELS = {"user": "res.users", "company": "res.company", "companies": "res.company", "website": "website"}
 RELATIONAL = frozenset({"Many2one", "One2many", "Many2many"})
+FIELDS_MODULES = ("fields", "odoo.fields", "openerp.fields")  # receivers of fields.X(...) declarations
 # recordset attributes that exist on every model without being declared in facts
 RS_SLOTS = frozenset({"env", "_ids", "_prefetch_ids", "_fields", "pool"})
-FRAMEWORK_CLASSES = frozenset({"BaseModel", "AbstractModel", "Model", "TransientModel"})
-MODEL_BASES = {"Model": "Model", "AbstractModel": "AbstractModel", "TransientModel": "TransientModel", "BaseModel": "BaseModel"}
 FRAMEWORK_FILES = ("odoo/models.py", "odoo/orm/models.py", "odoo/orm/models_transient.py", "odoo/orm/models_cached.py")
 # odoo 19+: names assigned on the ``odoo`` namespace package by odoo/init.py
 ODOO_INIT_NAMES = {
@@ -590,15 +590,11 @@ class _File:
 
     def u16(self, line0: int, bcol: int) -> int:
         """UTF-8 byte column -> UTF-16 column on ``line0``."""
-        if bcol <= 0:
-            return 0
         try:
             b = self.lines[line0]
         except IndexError:
-            return bcol
-        if b.isascii():
-            return bcol
-        return len(b[:bcol].decode("utf-8", "replace").encode("utf-16-le")) // 2
+            return max(bcol, 0)
+        return bytecol_to_utf16(b, bcol)
 
     # -- units ------------------------------------------------------------------
 
@@ -2482,7 +2478,7 @@ class _Analyzer:
                     # of another method (``_stage_find(domain=...)``) may target any model
                     if _call_name(call.func) in DOMAIN_ARGS:
                         return self.consumer_models(call, u)
-                    if p.arg == "domain" and _is_field_call(call):
+                    if p.arg == "domain" and _field_class(call, self.scope_of(call, u)):
                         return INDEXED
                 return None
             if isinstance(p, ast.Call):
@@ -2504,8 +2500,9 @@ class _Analyzer:
                 lp = parents.get(p)
                 if isinstance(lp, ast.keyword) and lp.arg == "domain":
                     call = parents.get(lp)
-                    if isinstance(call, ast.Call) and _is_field_call(call):
-                        cm = _field_comodel(call)
+                    ftype = _field_class(call, self.scope_of(call, u)) if isinstance(call, ast.Call) else None
+                    if ftype:
+                        cm = _field_comodel(call, ftype)
                         return (cm,) if cm else None
                 return None
             if isinstance(p, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
@@ -2923,16 +2920,33 @@ def _is_seq_call(p: ast.AST, cur: ast.AST) -> bool:
     return isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id in ("list", "tuple") and p.args[:1] == [cur]
 
 
-def _is_field_call(call: ast.Call) -> bool:
+def _field_class(call: ast.Call, scope: _Scope) -> str | None:
+    """Field class of a field declaration call, the forms of the facts extractor:
+    ``fields.X(...)`` (also ``odoo.fields`` / ``openerp.fields``) or ``X(...)``
+    with ``X`` imported by name from a ``*field*`` module (``from odoo.fields
+    import Many2one``, 19+ ``from .fields_misc import Id``)."""
     func = call.func
-    return isinstance(func, ast.Attribute) and _dotted(func.value) in ("fields", "odoo.fields") and func.attr[:1].isupper()
+    if isinstance(func, ast.Attribute):
+        return func.attr if _dotted(func.value) in FIELDS_MODULES and func.attr[:1].isupper() else None
+    if not isinstance(func, ast.Name):
+        return None
+    for b in _lookup(scope, func.id)[1] or ():
+        if b[0] == "import" and isinstance(b[2], ast.ImportFrom):
+            module, name = b[2].module or "", b[1].name
+        elif b[0] == "fimport" and b[1][I_NAME]:
+            module, name = b[1][I_MODULE], b[1][I_NAME]
+        else:
+            continue
+        if name[:1].isupper() and "field" in module.rsplit(".", 1)[-1]:
+            return name
+    return None
 
 
-def _field_comodel(call: ast.Call) -> str | None:
+def _field_comodel(call: ast.Call, ftype: str) -> str | None:
     for kw in call.keywords:
         if kw.arg == "comodel_name":
             return _str_const(kw.value)
-    if call.args and isinstance(call.func, ast.Attribute) and call.func.attr in RELATIONAL:
+    if call.args and ftype in RELATIONAL:
         return _str_const(call.args[0])
     return None
 

@@ -8,21 +8,25 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import textwrap
 import time
 import unittest
 
-from odoo_lens.analysis import targets_at
-from odoo_lens.analysis.targets import FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID
-from odoo_lens.analysis.xml import arch_ref_candidates, arch_ref_model
-from odoo_lens.cli import _ctx, headless_server, load_env
-from odoo_lens.extract import extract_source
-from odoo_lens.facts import R_CTX, R_KIND, R_VALUE, RECORDS, REF_FIELD, REFS, X_INFO
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from odoo_lens.analysis import targets_at  # noqa: E402
+from odoo_lens.analysis.targets import FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID  # noqa: E402
+from odoo_lens.analysis.xml import arch_ref_candidates, arch_ref_model  # noqa: E402
+from odoo_lens.cli import _ctx, headless_server, load_env  # noqa: E402
+from odoo_lens.extract import extract_source  # noqa: E402
+from odoo_lens.facts import R_CTX, R_KIND, R_VALUE, RECORDS, REF_FIELD, REFS, X_INFO  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MINI = os.path.join(HERE, "fixtures", "mini")
-WORKTREES = os.path.expanduser("~/odev/worktrees")
+WORKTREES = os.path.expanduser(os.environ.get("ODOO_LENS_WORKTREES", "~/odev/worktrees"))
 
 
 def find(path: str, needle: str, nth: int = 0, offset: int = 0) -> tuple[int, int]:

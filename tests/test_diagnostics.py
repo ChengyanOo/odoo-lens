@@ -658,7 +658,7 @@ class TestSynthetic18(SyntheticCase):
         self.assertIn("'diag.lab'", self.find(rel, "unknown-field", "no_such_lab_field")["message"])
         self.assertIn("'diag.lab.line'", self.find(rel, "unknown-field", "no_such_line_field")["message"])
         self.assertEqual(2, self.find(rel, "unknown-method", "action_nope")["severity"])
-        self.assertIn("private", self.find(rel, "unknown-method", "_private_method")["message"])
+        self.assertIn("private", self.find(rel, "private-method", "_private_method")["message"])
         self.assertEqual([], self.codes_at(rel, '"cancel" special'))
         self.assertEqual([], self.codes_at(rel, '"action_lab"'))
         # <groupby name="lab_id"> switches to diag.lab for its children

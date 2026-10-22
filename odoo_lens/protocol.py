@@ -133,7 +133,7 @@ class Endpoint:
         self._stopped = False
         self.shutdown_received = False
         self.dispatcher_thread: threading.Thread | None = None
-        # called on the reader thread for "exit" (default: hard exit, see _route)
+        # called on the reader thread for "exit" (default None: stop(); serve_stdio installs a hard exit, see _route)
         self.on_exit: Callable[[int], None] | None = None
 
     # -- registration -------------------------------------------------------

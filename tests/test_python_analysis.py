@@ -11,14 +11,18 @@ from __future__ import annotations
 import gc
 import os
 import statistics
+import sys
 import time
 import unittest
 
-from odoo_lens.analysis import python as pa
-from odoo_lens.analysis.targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, XMLID
-from odoo_lens.cli import headless_server, load_env
-from odoo_lens.documents import path_to_uri
-from odoo_lens.server import RequestContext
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from odoo_lens.analysis import python as pa  # noqa: E402
+from odoo_lens.analysis.targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, XMLID  # noqa: E402
+from odoo_lens.cli import headless_server, load_env  # noqa: E402
+from odoo_lens.documents import path_to_uri  # noqa: E402
+from odoo_lens.server import RequestContext  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MINI = os.path.join(HERE, "fixtures", "mini")

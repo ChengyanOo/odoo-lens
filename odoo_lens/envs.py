@@ -19,8 +19,7 @@ children are modules). Envs are discovered from file paths:
       "odoo": "../odoo",                    # community root (dir with odoo-bin)
       "addons": ["../enterprise", "."],     # extra addons roots
       "version": "17.0",                    # used to locate sources when "odoo" is absent
-      "diagnostics": true,
-      "python_paths": []                    # extra import roots for generic Python navigation
+      "diagnostics": true
     }
 
 Environment variables: ``ODOO_LENS_ODOO`` (community root), ``ODOO_LENS_ADDONS``
@@ -375,13 +374,6 @@ class Env:
     @property
     def diagnostics_enabled(self) -> bool:
         return bool(self.config.get("diagnostics", True))
-
-    def python_paths(self) -> list[str]:
-        out = []
-        base = os.path.dirname(self.config_path) if self.config_path else ""
-        for p in self.config.get("python_paths") or []:
-            out.append(os.path.normpath(os.path.join(base, os.path.expanduser(p))))
-        return out
 
     def contains(self, path: str) -> bool:
         return self.root_of(path) is not None
