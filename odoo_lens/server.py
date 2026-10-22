@@ -1,15 +1,3 @@
-"""LSP server: lifecycle, document sync, env/index management, request routing.
-
-Threads:
-* dispatcher (main): every handler + every registry mutation/query;
-* reader (protocol): parses stdin;
-* indexers: one background thread per env being (re)built; they publish a fully
-  built registry by assigning ``env.registry`` and setting ``env.ready`` - the
-  dispatcher then applies open-document overlays lazily (see :meth:`_registry`);
-* refresher: periodically re-stats indexed files in the background and posts the
-  changes to the dispatcher.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -37,14 +25,14 @@ from .protocol import (
 
 log = logging.getLogger("odoo_lens.server")
 
-INDEX_WAIT = float(os.environ.get("ODOO_LENS_INDEX_WAIT", "45"))  # max seconds a request waits (Claude Code times out at 60)
-REFRESH_INTERVAL = float(os.environ.get("ODOO_LENS_REFRESH", "30"))  # stat sweep period (0 = off)
-MAX_ENVS = int(os.environ.get("ODOO_LENS_MAX_ENVS", "3"))  # loaded registries kept in memory
+# seconds a request waits for an index build; Claude Code times requests out at 60 s
+INDEX_WAIT = float(os.environ.get("ODOO_LENS_INDEX_WAIT", "45"))
+REFRESH_INTERVAL = float(os.environ.get("ODOO_LENS_REFRESH", "30"))
+MAX_ENVS = int(os.environ.get("ODOO_LENS_MAX_ENVS", "3"))
 DIAG_DELAY = 0.35
 
 
 def _purge_caches() -> None:
-    """Drop module-level analysis caches (they may reference an evicted registry)."""
     from .analysis import js as _js
     from .analysis import python as _py
     from .analysis import xml as _xml
@@ -56,10 +44,8 @@ def _purge_caches() -> None:
             log.exception("clearing caches of %s failed", mod.__name__)
 
 
+# paths whose facts come from open documents; stored on the registry so a rebuilt one starts clean
 def overlay_paths(registry: Any) -> set[str]:
-    """Paths whose facts in ``registry`` come from open documents (not from disk).
-
-    Stored on the registry itself so that a freshly built registry starts clean."""
     paths = registry.__dict__.get("overlay_paths")
     if paths is None:
         paths = registry.__dict__["overlay_paths"] = set()
@@ -67,8 +53,6 @@ def overlay_paths(registry: Any) -> set[str]:
 
 
 class RequestContext:
-    """Everything a feature needs to answer a positional request."""
-
     __slots__ = ("server", "env", "registry", "path", "uri", "kind", "module", "scope", "line", "col", "token", "_facts", "_source")
 
     def __init__(self, server: "OdooLanguageServer", env: Env, registry: Any, path: str, line: int = 0, col: int = 0, token: CancelToken = NEVER_CANCELLED):
@@ -80,7 +64,6 @@ class RequestContext:
         name = os.path.basename(path)
         root = env.root_of(path)
         rel = os.path.relpath(path, root) if root else name
-        # module-relative path for kind detection (static/src/... for js)
         mod = registry.module_of_path(path) if registry is not None else None
         if mod and registry.module(mod) is not None:
             rel = os.path.relpath(path, registry.module(mod).path)
@@ -105,7 +88,6 @@ class RequestContext:
 
     @property
     def facts(self) -> dict | None:
-        """Facts of the current file reflecting the current (possibly unsaved) text."""
         if self._facts is None:
             self._facts = self.server.current_facts(self.env, self.path)
         return self._facts
@@ -121,10 +103,8 @@ class RequestContext:
 
 
 def _keeps_members(old: dict, new: dict) -> bool:
-    """The facts of a repaired (syntax error) Python buffer still declare every
-    class, field and method of the last good ones: safe to index."""
     if old.get(KIND) != KIND_PY or new.get(KIND) != KIND_PY:
-        return False  # XML / CSV after a parse error: truncated
+        return False  # XML/CSV facts after a parse error are truncated
     oc, nc = old.get(CLASSES) or (), new.get(CLASSES) or ()
     if [c[K_NAME] for c in oc] != [c[K_NAME] for c in nc]:
         return False
@@ -138,6 +118,7 @@ def _keeps_members(old: dict, new: dict) -> bool:
     return True
 
 
+# Only the dispatcher thread touches published registries; index threads just publish new ones.
 class OdooLanguageServer:
     def __init__(self, endpoint: Endpoint):
         self.endpoint = endpoint
@@ -150,18 +131,16 @@ class OdooLanguageServer:
         self.progress_supported = False
         self.markdown = True
         self.hierarchical_symbols = True
-        self._doc_facts: dict[str, tuple[Any, dict]] = {}  # path -> (doc version, facts)
-        self._disk_facts: dict[tuple, dict] = {}  # (path, mtime, size) -> full facts of non-open files
-        self._published: dict[str, int] = {}  # uri -> number of diagnostics last published
-        self._edited: set[str] = set()  # paths changed through didChange/didSave (diagnostics always published)
-        self._open_hint: Env | None = None  # env of a didOpen immediately preceding a request
+        self._doc_facts: dict[str, tuple[Any, dict]] = {}
+        self._disk_facts: dict[tuple, dict] = {}
+        self._published: dict[str, int] = {}
+        self._edited: set[str] = set()
+        self._open_hint: Env | None = None
         self._workspace_envs: list[Env] = []
         self._index_threads: dict[str, threading.Thread] = {}
         self._refreshing = False
         self._parent_pid: int | None = None
         self._register()
-
-    # ------------------------------------------------------------------ wiring
 
     def _register(self) -> None:
         ep = self.endpoint
@@ -204,8 +183,6 @@ class OdooLanguageServer:
             return handler(params or {}, token)
 
         return wrapped
-
-    # ------------------------------------------------------------- lifecycle
 
     def on_initialize(self, params: dict, token: CancelToken) -> dict:
         params = params or {}
@@ -269,8 +246,6 @@ class OdooLanguageServer:
             except PermissionError:
                 pass
 
-    # ------------------------------------------------------------- logging
-
     def log_message(self, message: str, level: int = 3) -> None:
         log.info(message)
         try:
@@ -278,10 +253,7 @@ class OdooLanguageServer:
         except Exception:
             pass
 
-    # ------------------------------------------------------------- indexing
-
     def ensure_index(self, env: Env) -> None:
-        """Start indexing ``env`` in the background unless built or in progress."""
         if env.registry is not None or env.indexing:
             return
         env.indexing = True
@@ -330,10 +302,10 @@ class OdooLanguageServer:
             self.endpoint.post(self.log_message, f"odoo-lens: indexed {env.label}: {stats.summary()}")
             self.endpoint.post(self._after_index, env)
         else:
-            env.ready.set()  # do not let requests wait forever
+            env.ready.set()
 
     def _after_index(self, env: Env) -> None:
-        self._registry(env)  # applies overlays
+        self._registry(env)
         for path in self.documents.open_paths():
             if self.envs.env_for_path(path) is env and self.should_publish(env, path):
                 self.publish_diagnostics(path)
@@ -348,14 +320,12 @@ class OdooLanguageServer:
             env.registry = None
             env.ready.clear()
         _purge_caches()
-        # registries are gc.freeze()d after their build: unfreeze to let the
-        # collector reclaim the evicted ones, then freeze the survivors again
+        # registries are gc.freeze()d: unfreeze so evicted ones get collected, then refreeze survivors
         gc.unfreeze()
         gc.collect()
         gc.freeze()
 
     def _registry(self, env: Env, wait: bool = True) -> Any:
-        """The published registry of ``env`` with open-document overlays applied."""
         env.last_used = time.monotonic()
         if env.registry is None:
             self.ensure_index(env)
@@ -371,9 +341,6 @@ class OdooLanguageServer:
         return reg
 
     def _adopt_new_module(self, env: Env, path: str) -> None:
-        """A file of a module created after indexing (Claude's Write tool): register
-        the module right away and index its other files in the background, instead
-        of waiting for the next stat sweep."""
         reg = env.registry
         if reg is None or reg.module_of_path(path) is not None:
             return
@@ -389,10 +356,8 @@ class OdooLanguageServer:
         if not self._refreshing:
             self._start_refresh([env])
 
+    # Claude Code opens files with their disk content: no overlay then (it would flush every registry cache)
     def _matches_index(self, reg: Any, path: str) -> bool:
-        """True if the open document's text is exactly the indexed disk content
-        (Claude Code opens files with their disk content: nothing to overlay, and
-        overlaying would needlessly invalidate every registry cache)."""
         doc = self.documents.get(path)
         if doc is None or path not in reg.file_stats:
             return False
@@ -405,11 +370,8 @@ class OdooLanguageServer:
         except OSError:
             return False
 
+    # full facts (doc text, else disk); index=True extraction drops e.g. XML record <field name> refs
     def current_facts(self, env: Env, path: str) -> dict | None:
-        """Full facts for ``path`` (open document text, else the file on disk).
-
-        Unlike the index (built with ``index=True``), these include the
-        high-volume facts such as XML record-level ``<field name>`` refs."""
         doc = self.documents.get(path)
         if doc is None:
             try:
@@ -449,11 +411,10 @@ class OdooLanguageServer:
         return kind_for_path(name, rel)
 
     def _sync_doc(self, path: str) -> None:
-        """Push an open document's current facts into its env's registry."""
         env = self.envs.env_for_path(path)
         if env is None or env.registry is None:
             return
-        if self.documents.refresh_from_disk(path):  # changed on disk behind our back
+        if self.documents.refresh_from_disk(path):
             self._doc_facts.pop(path, None)
         self._adopt_new_module(env, path)
         if path not in overlay_paths(env.registry) and self._matches_index(env.registry, path):
@@ -465,15 +426,11 @@ class OdooLanguageServer:
         if facts.get("error"):
             old = env.registry.file_facts(path)
             if old is not None and not old.get("error") and not _keeps_members(old, facts):
-                # mid-edit syntax error that hides definitions: keep the last good facts
-                # indexed (the error itself is still reported by diagnostics, computed
-                # from current_facts)
+                # mid-edit syntax error hiding definitions: keep last good facts (diagnostics still report it)
                 return
         env.registry.update_file(path, facts)
         if facts.get("kind") == KIND_MANIFEST:
             env.registry.set_modules(dict(env.registry.module_dirs))
-
-    # ----------------------------------------------------------- refresh
 
     def _refresh_tick(self) -> None:
         if getattr(self.endpoint, "shutdown_received", False):
@@ -484,12 +441,8 @@ class OdooLanguageServer:
                 self._start_refresh(envs)
         self.endpoint.post_later(REFRESH_INTERVAL, "refresh", self._refresh_tick)
 
+    # dispatcher only: the refresher thread compares against these copies, never a published registry
     def _start_refresh(self, envs: list[Env]) -> None:
-        """Start a stat sweep of ``envs`` in the background (dispatcher thread only).
-
-        The sweep compares against copies of each registry's ``file_stats`` and
-        ``module_dirs`` taken here: the background thread never reads a published
-        registry."""
         snapshots = []
         for env in envs:
             reg = env.registry
@@ -539,7 +492,7 @@ class OdooLanguageServer:
                 reg.shards[root].pop(os.path.relpath(path, root), None)
                 dirty.add(root)
             doc = self.documents.get(path)
-            if doc is not None:  # deleted behind our back (git, rm): forget the document too
+            if doc is not None:
                 self.documents.close(doc.uri)
                 self._doc_facts.pop(path, None)
             overlaid.discard(path)
@@ -552,13 +505,12 @@ class OdooLanguageServer:
             reg.shards.setdefault(fe.root, {})[fe.rel] = (mtime, size, facts)
             dirty.add(fe.root)
             if self.documents.is_open(path):
-                # Claude Code's edits write the file: the disk is the truth for open
-                # documents too (no didClose/didChangeWatchedFiles ever arrives)
+                # disk is the truth for open docs too: no didChangeWatchedFiles, didClose only on LRU eviction
                 if self.documents.refresh_from_disk(path):
                     self._doc_facts.pop(path, None)
                 if self._matches_index(reg, path):
                     overlaid.discard(path)
-                else:  # an editor buffer with unsaved changes: keep overlaying it
+                else:
                     facts = self.current_facts(env, path) or facts
             changes[path] = facts
         module_dirs = sc.modules if sc.modules != reg.module_dirs else None
@@ -572,8 +524,6 @@ class OdooLanguageServer:
                 if self.envs.env_for_path(path) is env and self.should_publish(env, path):
                     self.publish_diagnostics(path)
 
-    # ------------------------------------------------------------- documents
-
     def on_did_open(self, params: dict) -> None:
         td = params["textDocument"]
         doc = self.documents.open(td["uri"], td.get("text", ""), td.get("version"), td.get("languageId", ""))
@@ -582,18 +532,17 @@ class OdooLanguageServer:
         if env is None:
             return
         env.last_used = time.monotonic()
-        # Claude Code opens the file of an LSP call right before the request: the
-        # best hint of which env a following workspace/symbol is about
+        # Claude Code opens a file right before an LSP call on it: env hint for workspace/symbol
         self._open_hint = env
-        try:  # the first Edit/Write of a file arrives as a didOpen of the new content
+        # the first Edit/Write of a file arrives as a didOpen of the new content
+        try:
             if time.time() - os.stat(doc.path).st_mtime < 3:
                 self._edited.add(doc.path)
         except OSError:
             pass
         self.ensure_index(env)
         self._sync_doc(doc.path)
-        # Claude Code opens files when navigating into them; only report problems
-        # for files outside the Odoo sources (custom modules) or files being edited.
+        # Claude Code opens files while navigating: publish only for custom modules or edited files
         if self.should_publish(env, doc.path):
             self.publish_diagnostics(doc.path)
 
@@ -603,7 +552,7 @@ class OdooLanguageServer:
         if doc is None:
             return
         self._edited.add(doc.path)
-        # publish right away: Claude Code collects diagnostics right after the tool batch
+        # no debounce: Claude Code collects diagnostics right after the tool batch
         self._sync_doc(doc.path)
         self.publish_diagnostics(doc.path)
 
@@ -676,8 +625,6 @@ class OdooLanguageServer:
             if folder in self.workspace_folders:
                 self.workspace_folders.remove(folder)
 
-    # ------------------------------------------------------------- diagnostics
-
     def schedule_diagnostics(self, path: str, delay: float = DIAG_DELAY) -> None:
         if not self.documents.is_open(path):
             return
@@ -692,7 +639,7 @@ class OdooLanguageServer:
             return
         reg = self._registry(env, wait=False)
         if reg is None:
-            return  # published once the index is ready (_after_index)
+            return
         from . import features
 
         ctx = RequestContext(self, env, reg, path)
@@ -716,8 +663,6 @@ class OdooLanguageServer:
 
         return {"kind": "full", "items": features.diagnostics(ctx)}
 
-    # ------------------------------------------------------------- requests
-
     def _context(self, params: dict, token: CancelToken, positional: bool = True) -> RequestContext | None:
         uri = (params.get("textDocument") or {}).get("uri")
         if not uri:
@@ -726,7 +671,7 @@ class OdooLanguageServer:
         env = self.envs.env_for_path(path)
         if env is None:
             return None
-        if self.documents.refresh_from_disk(path):  # changed on disk behind our back (git, Bash...)
+        if self.documents.refresh_from_disk(path):
             self._doc_facts.pop(path, None)
             if env.registry is not None:
                 self._sync_doc(path)
@@ -790,8 +735,6 @@ class OdooLanguageServer:
         from . import features
 
         query = params.get("query") or ""
-        # workspace/symbol carries no file: use the env of the file Claude Code just
-        # opened for this call, else the workspace's env, else the most recently used
         hint = getattr(self, "_hint", None)
         if hint is not None:
             envs = [hint]
@@ -859,9 +802,8 @@ class OdooLanguageServer:
         return out
 
 
+# lone Location, not a 1-item array: Claude Code's git check-ignore filter only applies to arrays
 def _one_or_many(locations: list | None) -> Any:
-    """A single Location rather than a 1-item array: Claude Code's gitignore
-    filter only applies to arrays, so a lone definition always gets through."""
     if not locations:
         return None
     return locations[0] if len(locations) == 1 else locations
@@ -878,9 +820,7 @@ def setup_logging() -> None:
 
 def serve_stdio() -> int:
     setup_logging()
-    # Keep private, non-inheritable copies of the protocol pipes and point fds 0/1
-    # elsewhere: no child process (indexing pool, multiprocessing's resource
-    # tracker) can then write into the protocol stream or keep the pipes open.
+    # private non-inheritable protocol fds; 0/1 repointed so no child process can write to or hold them
     in_fd, out_fd = os.dup(0), os.dup(1)
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
@@ -888,7 +828,7 @@ def serve_stdio() -> int:
     os.dup2(2, 1)
     stdin = open(in_fd, "rb")
     stdout = open(out_fd, "wb")
-    sys.stdout = sys.stderr  # nothing but protocol messages may reach the protocol pipe
+    sys.stdout = sys.stderr  # the protocol pipe carries protocol messages only
     endpoint = Endpoint(Transport(stdin, stdout))
 
     def hard_exit(code: int) -> None:
@@ -902,9 +842,8 @@ def serve_stdio() -> int:
             os._exit(code)
 
     endpoint.on_exit = hard_exit
-    OdooLanguageServer(endpoint)  # registers its handlers on the endpoint
+    OdooLanguageServer(endpoint)
     endpoint.serve_forever()
-    # stdin EOF (or stop): the reader thread is blocked in readline() holding the
-    # buffer lock, so a regular interpreter shutdown would abort - leave directly
+    # reader thread may block in readline() holding the buffer lock: normal shutdown would abort
     hard_exit(0 if endpoint.shutdown_received else 1)
     return 0

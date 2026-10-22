@@ -1,21 +1,3 @@
-"""Measure Python receiver inference on a real Odoo checkout.
-
-    python3.12 scripts/coverage_python.py <checkout_dir> [modules...] [--samples N] [--all]
-
-For the methods of the model classes of a sample of modules (default: sale,
-account, stock, purchase, mrp, project, hr, crm, point_of_sale, website_sale +
-5 enterprise modules; ``--all`` for every module), counts the record-attribute
-accesses ``X.attr``: those whose receiver is inferred as a recordset, plus those
-with an unknown receiver whose attribute is a member of some model. Reports
-
-  (a) the share whose receiver was inferred as a recordset,
-  (b) among those, the share resolving to a field / method / attribute of the
-      inferred model,
-
-the outcome of the name-based fallback for unknown receivers, and samples of
-unresolved accesses (wrong-model samples reveal missing rules or registry bugs).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -36,7 +18,6 @@ DEFAULT_MODULES = [
     "sale_subscription", "account_accountant", "helpdesk", "planning", "documents",
 ]
 SKIP_DIRS = {"tests", "migrations", "upgrades", "upgrade", "static", "__pycache__"}
-# attributes every recordset has without a declaration in the facts
 RS_BUILTIN = pa.RS_SLOTS | {"_origin", "ids", "_ids", "_name", "_context", "_cr", "_uid"}
 
 
@@ -123,12 +104,12 @@ def main() -> int:
                             if rs_ok(an, t[1], attr):
                                 resolved += 1
                             elif heir_ok(an, t[1], attr):
-                                mixin += 1  # abstract mixin using members of the models inheriting it
+                                mixin += 1
                             else:
                                 unresolved.append(f"{where}  {text(f, node)}  receiver={list(t[1])}")
                             continue
                         if t is not None:
-                            continue  # known non-recordset (env, module, scalar, dict...)
+                            continue
                         if attr in pa.NON_MODEL_ATTRS or not [m for m in reg.models_with_member(attr) if m]:
                             continue
                         total += 1

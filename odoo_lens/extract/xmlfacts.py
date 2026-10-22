@@ -1,11 +1,4 @@
-"""XML facts extractor (data files, views, QWeb templates, owl templates).
-
-Uses the C ``expat`` parser; positions come from ``CurrentByteIndex`` (start of
-each tag) plus a quote-aware scan of the raw start tag to locate attribute
-values. Every reference is emitted with its exact range and role (see
-``facts.py``); view-arch field references carry the record index and the
-x2many *subpath* leading to their model.
-"""
+# expat reports only tag starts (CurrentByteIndex): attribute value ranges come from the raw tag
 
 from __future__ import annotations
 
@@ -40,7 +33,7 @@ PERCENT_RE = re.compile(r"""%\(([A-Za-z0-9_.\-]+)\)[ds]""")
 XPATH_FIELD_RE = re.compile(r"""field\[@name\s*=\s*(['"])([A-Za-z0-9_]+)\1\]""")
 XPATH_STEP_RE = re.compile(r"""/+([A-Za-z_][\w\-]*)""")
 DOMAIN_FIELD_RE = re.compile(r"""[(\[]\s*(['"])([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\1\s*,""")
-# a domain LEAF: ('path', 'operator', ...) - values like ('done', 'cancel') must not match
+# leaf only: ('path', 'op', ...); value tuples like ('done', 'cancel') must not match
 DOMAIN_LEAF_RE = re.compile(
     r"""[(\[]\s*(['"])([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\1\s*,\s*(['"])"""
     r"""(?:=|!=|<>|<|>|<=|>=|=\?|=like|=ilike|like|not like|ilike|not ilike|in|not in|child_of|parent_of|any|not any|any!|not any!)\3"""
@@ -85,17 +78,17 @@ class _Frame:
 
     def __init__(self, tag: str):
         self.tag = tag
-        self.rec = -1  # index of the enclosing record (-1: none)
-        self.arch = False  # inside a view arch / template body
-        self.qweb = False  # QWeb semantics (t-call refers to templates)
-        self.subpath: tuple = ()  # x2many path for fields of this element's children
-        self.field_name: str | None = None  # for <field name=...> inside an arch
-        self.capture: str | None = None  # record field whose text content is captured
+        self.rec = -1
+        self.arch = False
+        self.qweb = False
+        self.subpath: tuple = ()  # x2many path to the model of this element's children
+        self.field_name: str | None = None
+        self.capture: str | None = None
         self.text_start = -1
         self.menu_id: str | None = None
-        self.created = False  # this element created record ``rec``
-        self.arch_field = False  # the <field name="arch" type="xml"> element itself
-        self.attrs_spec = False  # inside a position="attributes" spec (only <attribute> children matter)
+        self.created = False
+        self.arch_field = False
+        self.attrs_spec = False
 
 
 _intern = sys.intern
@@ -119,8 +112,6 @@ class _XmlExtractor:
         self.p.StartElementHandler = self.start
         self.p.EndElementHandler = self.end
 
-    # -- positions -------------------------------------------------------------------
-
     def tag_span(self, idx: int) -> tuple[int, int]:
         m = TAG_RE.match(self.src, idx)
         return (idx, m.end()) if m else (idx, idx + 1)
@@ -136,19 +127,17 @@ class _XmlExtractor:
         line, c0, c1 = self.s.span(start, end)
         self.refs.append((kind, _intern(value), line, c0, c1, ctx))
 
+    # source byte offset per char of expat's decoded value, then the end; None: same bytes or unmappable
     def value_map(self, span: tuple[int, int], value: str) -> list[int] | None:
-        """Byte offset in the source of each character of an attribute ``value`` as
-        expat reports it (entities decoded, newlines/tabs normalized to spaces),
-        plus the end offset; None if the raw text cannot be mapped back."""
         raw = self.src[span[0] : span[1]]
         if raw.isascii() and b"&" not in raw and b"\n" not in raw and b"\t" not in raw and b"\r" not in raw:
-            return None  # identical: callers use the fast path
+            return None
         out: list[int] = []
         chars: list[str] = []
         i, n, base = 0, len(raw), span[0]
         while i < n:
             b = raw[i]
-            if b == 0x26:  # &entity;
+            if b == 0x26:
                 j = raw.find(b";", i, i + 12)
                 ent = raw[i + 1 : j].decode("ascii", "replace") if j > 0 else ""
                 ch = _ENTITIES.get(ent)
@@ -163,7 +152,7 @@ class _XmlExtractor:
                 chars.append(ch)
                 i = j + 1
                 continue
-            if b == 0x0D and raw[i + 1 : i + 2] == b"\n":  # CRLF: one normalized blank
+            if b == 0x0D and raw[i + 1 : i + 2] == b"\n":
                 out.append(base + i)
                 chars.append(" ")
                 i += 2
@@ -183,7 +172,6 @@ class _XmlExtractor:
         return out
 
     def add_value_ref(self, kind: str, item: str, span: tuple[int, int], vmap: list[int] | None, value: str, i: int, ctx: tuple) -> None:
-        """Ref for ``value[i:i+len(item)]`` of an attribute value at ``span``."""
         j = i + len(item)
         if vmap is None:
             start = span[0] + len(value[:i].encode())
@@ -199,8 +187,8 @@ class _XmlExtractor:
         if stripped:
             self.add_value_ref(kind, stripped, span, self.value_map(span, value), value, len(value) - len(value.lstrip()), ctx)
 
+    # "!x" negates a group; menuitem groups="-x" unlinks one
     def ref_list_attr(self, kind: str, ts: int, te: int, attr: str, value: str, ctx: tuple, strip: str = "!-") -> None:
-        """Comma-separated xml ids (groups="a.b,!c.d"; menus use "-x" to unlink)."""
         span = self.attr_span(ts, te, attr)
         if span is None:
             return
@@ -217,7 +205,6 @@ class _XmlExtractor:
             pos += len(part) + 1
 
     def scan_attr(self, rx: re.Pattern, group: int, kind: str, ts: int, te: int, attr: str, value: str, ctx: tuple) -> None:
-        """Refs found by ``rx`` inside an attribute value (ref('x'), %(x)d...)."""
         span = self.attr_span(ts, te, attr)
         if span is None:
             return
@@ -226,13 +213,12 @@ class _XmlExtractor:
             self.add_value_ref(kind, m.group(group), span, vmap, value, m.start(group), ctx)
 
     def expr_fields(self, ts: int, te: int, attr: str, value: str, ctx: tuple) -> None:
-        """Field identifiers used in a python expression attribute (17.0+ invisible=...)."""
         span = self.attr_span(ts, te, attr)
         if span is None:
             return
         vmap = self.value_map(span, value)
         masked = STRING_RE.sub(lambda m: " " * len(m.group()), value)
-        masked = PERCENT_MASK_RE.sub(lambda m: " " * len(m.group()), masked)  # %(xmlid)d is not a field
+        masked = PERCENT_MASK_RE.sub(lambda m: " " * len(m.group()), masked)
         for m in IDENT_RE.finditer(masked):
             name = m.group()
             if name in EXPR_SKIP or name[0].isupper():
@@ -243,9 +229,8 @@ class _XmlExtractor:
                 continue
             self.add_value_ref(REF_FIELD, name, span, vmap, value, m.start(), ctx)
 
+    # <attribute name="invisible">expr</attribute>; 16.0 name="attrs" holds a dict of domains
     def text_expr_refs(self, start: int, end: int, attr: str, ctx: tuple) -> None:
-        """Field refs of an expression set by <attribute name="invisible">...</attribute>
-        (16.0: name="attrs" holds a dict of domains)."""
         raw = self.src[start:end]
         if attr == "attrs":
             for m in DOMAIN_LEAF_B.finditer(raw):
@@ -267,9 +252,6 @@ class _XmlExtractor:
             self.add_ref(REF_FIELD, name, b0, b0 + len(name.encode()), ctx)
 
     def text_refs(self, start: int, end: int, rec: int, field: str) -> None:
-        """Refs inside the text of a record field: domain leaves of domain_force /
-        domain (record_domain) and methods called on the record's model in server
-        action / cron code (code); their model is resolved from the record."""
         raw = self.src[start:end]
         if field == "code":
             for m in CODE_CALL_B.finditer(raw):
@@ -277,8 +259,6 @@ class _XmlExtractor:
         else:
             for m in DOMAIN_LEAF_B.finditer(raw):
                 self.add_ref(REF_FIELD, m.group(2).decode(), start + m.start(2), start + m.end(2), ("record_domain", rec))
-
-    # -- records ---------------------------------------------------------------------
 
     def new_record(self, xid: str | None, model: str | None, tag: str, ts: int, te: int, info: dict) -> int:
         span = self.attr_span(ts, te, "id") if xid else None
@@ -292,8 +272,6 @@ class _XmlExtractor:
             info["noupdate"] = True
         self.records.append([_intern(xid) if xid else xid, _intern(model) if model else model, tag, line, c0, c1, line, info])
         return len(self.records) - 1
-
-    # -- expat handlers ----------------------------------------------------------------
 
     def start(self, tag: str, a: dict) -> None:
         ts, te = self.tag_span(self.p.CurrentByteIndex)
@@ -363,15 +341,12 @@ class _XmlExtractor:
                     except ValueError:
                         pass
                 elif name in ("report_name", "report_file") and rec[X_MODEL] == "ir.actions.report" and "." in value and " " not in value:
-                    # the QWeb template rendering the report (its key / xml id)
                     if name == "report_name":
                         self.add_ref(REF_XMLID, value, start, end, ("report",))
                 elif name == "key":
                     rec[X_INFO]["key"] = value
         if f.created and idx >= 0:
             self.records[f.rec][X_END_LINE] = self.s.pos(idx)[0]
-
-    # -- data files -------------------------------------------------------------------
 
     def data_element(self, f: _Frame, parent: _Frame | None, tag: str, a: dict, ts: int, te: int) -> None:
         in_record = parent is not None and parent.tag == "record" and parent.rec >= 0
@@ -390,9 +365,9 @@ class _XmlExtractor:
                 self.ref_attr(REF_FIELD, ts, te, "name", name, ("record", parent.rec))  # type: ignore[union-attr]
             if "ref" in a:
                 self.ref_attr(REF_XMLID, ts, te, "ref", a["ref"], ("ref",))
-                if name == "model_id":  # ir.rule / ir.cron / ir.actions.server / ir.access: their model
+                if name == "model_id":
                     rec[X_INFO]["model_id"] = a["ref"].strip()
-                elif name == "binding_model_id":  # actions listed in the Action / Print menu of a model
+                elif name == "binding_model_id":
                     rec[X_INFO]["binding_model_id"] = a["ref"].strip()
                 if name == "inherit_id":
                     rec[X_INFO]["inherit_id"] = a["ref"].strip()
@@ -440,7 +415,7 @@ class _XmlExtractor:
                 self.ref_attr(REF_XMLID, ts, te, "inherit_id", a["inherit_id"], ("inherit_id",))
             info["view_type"] = "qweb"
             f.rec = self.new_record(a.get("id"), "ir.ui.view", "template", ts, te, info)
-            if not self.attr_span(ts, te, "id") and a.get("id"):  # t-name used as id
+            if not self.attr_span(ts, te, "id") and a.get("id"):
                 rec = self.records[f.rec]
                 span = self.attr_span(ts, te, "t-name")
                 if span:
@@ -506,12 +481,9 @@ class _XmlExtractor:
             return
         if tag in DATA_ROOTS or parent is None:
             return
-        # unknown data element carrying an id directly under <odoo>/<data> (e.g. <asset>)
         if a.get("id") and parent.tag in DATA_ROOTS:
             model = "ir.asset" if tag == "asset" else None
             f.rec = self.new_record(a.get("id"), model, tag, ts, te, {k: v for k, v in a.items() if k in ("name", "bundle")})
-
-    # -- arch / qweb ---------------------------------------------------------------------
 
     def arch_element(self, f: _Frame, parent: _Frame | None, tag: str, a: dict, ts: int, te: int) -> None:
         rec = f.rec
@@ -521,10 +493,9 @@ class _XmlExtractor:
         else:
             f.subpath = sub
         if parent is not None and parent.arch_field and rec >= 0 and tag in SUBVIEW_TAGS:
-            self.records[rec][X_INFO].setdefault("type", tag)  # the arch root tag = view type
+            self.records[rec][X_INFO].setdefault("type", tag)
         if f.attrs_spec:
-            # children of position="attributes" are <attribute> values, not view nodes;
-            # the expressions they set still name fields of the located element
+            # <attribute> children are values, not view nodes; their expressions name located-element fields
             if tag == "attribute" and a.get("name") in ATTR_EXPR_NAMES and rec >= 0 and not f.qweb:
                 f.capture = "attribute:" + a["name"]
                 f.text_start = te
@@ -549,7 +520,7 @@ class _XmlExtractor:
             elif tag == "groupby" and a.get("name") and NAME_RE.match(a["name"]):
                 # <groupby name="m2o"> in a list is a sub-view on the m2o's comodel
                 self.ref_attr(REF_FIELD, ts, te, "name", a["name"], ("arch", rec, sub))
-                if "position" not in a:  # a spec locating a groupby inserts siblings
+                if "position" not in a:  # a locator's children go beside the groupby, not in it
                     f.subpath = sub + (a["name"],)
             elif (tag == "button" or a.get("type") == "object") and a.get("name") and "special" not in a:
                 name = a["name"]
@@ -557,8 +528,7 @@ class _XmlExtractor:
                 if "%(" in name:
                     self.scan_attr(PERCENT_RE, 1, REF_XMLID, ts, te, "name", name, ("percent",))
                 elif (btype == "object" or (btype is None and "position" in a)) and NAME_RE.match(name):
-                    # explicit object buttons, and untyped button *locators* in inherited views
-                    # (analysis checks against the parent arch whether they locate an object button)
+                    # object buttons + untyped locators in inherited views (analysis resolves them in the parent arch)
                     self.ref_attr(REF_METHOD, ts, te, "name", name, ("button", rec, sub))
                 elif btype == "action" and "." in name:
                     self.ref_attr(REF_XMLID, ts, te, "name", name, ("action",))
@@ -577,8 +547,7 @@ class _XmlExtractor:
             if attr == "attrs" and not f.qweb:
                 self.scan_attr(DOMAIN_LEAF_RE, 2, REF_FIELD, ts, te, attr, v, ("expr", rec, f.subpath if tag != "field" else sub))
             elif attr in ("domain", "filter_domain") and not f.qweb:
-                # a <field domain> filters the field's comodel; <filter domain> and
-                # search <field filter_domain> filter the view's model
+                # <field domain> filters the comodel; <filter domain>, <field filter_domain> the view's model
                 on_field = a.get("name") if tag == "field" and attr == "domain" and NAME_RE.match(a.get("name") or "") else None
                 self.scan_attr(DOMAIN_LEAF_RE, 2, REF_FIELD, ts, te, attr, v, ("arch_domain", rec, sub, on_field))
         if not f.qweb:
@@ -596,13 +565,10 @@ class _XmlExtractor:
         steps = [(m.start(), m.group(1)) for m in XPATH_STEP_RE.finditer(expr)]
         for m in XPATH_FIELD_RE.finditer(expr):
             name = m.group(2)
-            # model of this field: the current subpath
             if span and raw == expr:
                 start = span[0] + len(expr[: m.start(2)].encode())
                 self.add_ref(REF_FIELD, name, start, start + len(name.encode()), ("arch", rec, tuple(path)))
-            # a sub-view step or another field step after this field step means the
-            # expression descends into the field's comodel (field[@name='x']/list/...,
-            # field[@name='x']//field[@name='y'])
+            # a following sub-view or field step descends into the comodel: field[@name='x']//field[@name='y']
             nxt = [t for (pos, t) in steps if pos >= m.end()]
             if nxt and (nxt[0] in SUBVIEW_TAGS or nxt[0] == "field"):
                 path.append(name)
@@ -614,14 +580,11 @@ class _XmlExtractor:
             for m in XPATH_LABEL_RE.finditer(expr):
                 self.add_value_ref(REF_FIELD, m.group(2), span, vmap, expr, m.start(2), ("label", rec, tuple(path)))
 
-    # -- owl / client templates ---------------------------------------------------------
-
     def owl_element(self, f: _Frame, tag: str, a: dict, ts: int, te: int) -> None:
         if a.get("t-name"):
             info: dict = {}
             if a.get("t-inherit"):
                 info["inherit"] = a["t-inherit"]
-                # an extension modifies its parent in place: its t-name is no template
                 info["mode"] = "extension" if a.get("t-inherit-mode") == "extension" else "primary"
             f.rec = self.new_record(a["t-name"].strip(), None, "qweb", ts, te, info)
         if a.get("t-inherit"):
@@ -637,7 +600,7 @@ def extract(path: str, src: bytes, index: bool = False) -> dict:
         ex.p.Parse(src, True)
     except expat.ExpatError as exc:
         facts[ERROR] = (expat.errors.messages.get(exc.code, str(exc)) if hasattr(expat.errors, "messages") else str(exc), max(0, exc.lineno - 1), exc.offset)
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # pragma: no cover
         facts[ERROR] = (f"{type(exc).__name__}: {exc}", 0, 0)
     facts[ROOT] = ex.root
     facts[RECORDS] = [tuple(r) for r in ex.records]

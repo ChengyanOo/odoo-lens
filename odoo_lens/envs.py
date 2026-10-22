@@ -1,33 +1,3 @@
-"""Odoo environment discovery.
-
-An :class:`Env` is everything needed to analyse one Odoo installation: the Odoo
-version, the community source root (the directory holding ``odoo-bin`` and the
-``odoo`` package) and the ordered list of addons roots (directories whose
-children are modules). Envs are discovered from file paths:
-
-1. explicit configuration: a ``.odoo-lens.json`` file in the file's directory or
-   any ancestor, or the ``ODOO_LENS_*`` environment variables;
-2. a file inside an Odoo source tree (community, enterprise, design-themes
-   checked out side by side, e.g. odev worktrees ``<root>/<ver>/{odoo,enterprise}``);
-3. a file inside a custom module: the Odoo version is guessed from the module
-   manifests (majority vote on ``'version': '17.0.x.y.z'``) and the matching
-   Odoo sources are looked up in well-known locations (``~/odev/worktrees/<ver>``...).
-
-``.odoo-lens.json`` (all keys optional, paths relative to the file)::
-
-    {
-      "odoo": "../odoo",                    # community root (dir with odoo-bin)
-      "addons": ["../enterprise", "."],     # extra addons roots
-      "version": "17.0",                    # used to locate sources when "odoo" is absent
-      "diagnostics": true
-    }
-
-Environment variables: ``ODOO_LENS_ODOO`` (community root), ``ODOO_LENS_ADDONS``
-(os.pathsep-separated addons roots), ``ODOO_LENS_VERSION``, ``ODOO_LENS_SOURCES``
-(os.pathsep-separated templates such as ``~/src/{version}/odoo`` used to locate the
-sources of a version; ``{version}`` is e.g. ``17.0`` or ``saas-17.2``).
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -44,8 +14,6 @@ log = logging.getLogger("odoo_lens.envs")
 CONFIG_NAMES = (".odoo-lens.json", "odoo-lens.json")
 MANIFEST = "__manifest__.py"
 
-# Where Odoo sources for a given version are looked up when a workspace only
-# contains custom modules. "{version}" is the branch label (17.0, saas-17.2).
 DEFAULT_SOURCE_TEMPLATES = (
     "~/odev/worktrees/{version}/odoo",
     "~/odoo/worktrees/{version}/odoo",
@@ -65,8 +33,6 @@ SKIP_DIRS = frozenset(
 
 
 class OdooVersion:
-    """``16.0`` -> (16, 0); ``saas~19.2`` / ``saas-19.2`` -> (19, 2)."""
-
     __slots__ = ("major", "minor")
 
     def __init__(self, major: int, minor: int = 0):
@@ -87,7 +53,6 @@ class OdooVersion:
 
     @property
     def label(self) -> str:
-        """Branch name: ``18.0`` or ``saas-19.2``."""
         return f"{self.major}.0" if self.minor == 0 else f"saas-{self.major}.{self.minor}"
 
     def key(self) -> tuple[int, int]:
@@ -116,7 +81,6 @@ _RELEASE_RE = re.compile(r"^version_info\s*=\s*\(\s*([^,]+),\s*(\d+)", re.M)
 
 
 def read_release_version(community_root: str) -> OdooVersion | None:
-    """Parse ``<root>/odoo/release.py`` -> version (no import)."""
     try:
         with open(os.path.join(community_root, "odoo", "release.py"), encoding="utf-8") as fh:
             text = fh.read()
@@ -145,7 +109,6 @@ def is_module_dir(path: str) -> bool:
 
 
 def is_addons_root(path: str, limit: int = 4000) -> bool:
-    """True if some direct child of ``path`` is a module."""
     try:
         with os.scandir(path) as it:
             for i, entry in enumerate(it):
@@ -159,7 +122,6 @@ def is_addons_root(path: str, limit: int = 4000) -> bool:
 
 
 def module_root_of(path: str) -> str | None:
-    """Closest ancestor directory (or ``path`` itself) that is a module."""
     d = path if os.path.isdir(path) else os.path.dirname(path)
     home = os.path.expanduser("~")
     while True:
@@ -177,20 +139,18 @@ def community_addons_roots(community: str) -> list[str]:
 
 
 def sibling_addons_roots(community: str) -> list[str]:
-    """Addons roots next to the community checkout (enterprise, design-themes, ...)."""
     container = os.path.dirname(community)
     found = []
     try:
         names = sorted(os.listdir(container))
     except OSError:
         return found
-    # enterprise first: it is the usual companion of community
     names.sort(key=lambda n: (n != "enterprise", n))
     for name in names:
         p = os.path.join(container, name)
         if p == community or name.startswith(".") or not os.path.isdir(p):
             continue
-        if is_community_root(p):  # another Odoo checkout living next to this one
+        if is_community_root(p):
             continue
         if is_addons_root(p):
             found.append(p)
@@ -198,17 +158,14 @@ def sibling_addons_roots(community: str) -> list[str]:
 
 
 def find_community_root(path: str) -> str | None:
-    """Community root containing ``path`` or sitting next to one of its ancestors."""
     d = path if os.path.isdir(path) else os.path.dirname(path)
     home = os.path.expanduser("~")
     while True:
         if is_community_root(d):
             return d
-        # d is the container of a side-by-side layout: <d>/{odoo,enterprise,...}
         child = os.path.join(d, "odoo")
         if is_community_root(child):
             return child
-        # odev / side-by-side layout: <container>/{odoo,enterprise,...}
         sib = os.path.join(os.path.dirname(d), "odoo")
         if sib != d and is_community_root(sib) and is_addons_root(d):
             return sib
@@ -247,15 +204,13 @@ def manifest_version(module_dir: str) -> OdooVersion | None:
     if not m:
         return None
     raw = m.group(1)
-    # "17.0.1.0.0" is versioned for 17.0; "1.0" / "0.1" carry no Odoo version.
+    # "17.0.1.0.0" names its Odoo version; a short "1.0" / "0.1" does not
     if raw.count(".") < 2 and not raw.startswith("saas"):
         return None
     return OdooVersion.parse(raw)
 
 
 def iter_module_dirs(root: str, max_depth: int = 3) -> Iterable[str]:
-    """Module directories under ``root`` (``root`` itself included), pruning
-    hidden/vendor dirs and not descending into modules or Odoo checkouts."""
     stack = [(root, 0)]
     while stack:
         d, depth = stack.pop()
@@ -288,7 +243,6 @@ def source_templates() -> list[str]:
 
 
 def locate_sources(version: OdooVersion) -> str | None:
-    """Find a community checkout of ``version`` in the well-known locations."""
     labels = [version.label]
     if version.minor:
         labels.append(f"saas~{version.major}.{version.minor}")
@@ -303,7 +257,6 @@ def locate_sources(version: OdooVersion) -> str | None:
 
 
 def available_versions() -> list[tuple[OdooVersion, str]]:
-    """All versions found in the well-known source locations (newest first)."""
     seen: dict[OdooVersion, str] = {}
     for template in source_templates():
         if "{version}" not in template:
@@ -330,8 +283,6 @@ def available_versions() -> list[tuple[OdooVersion, str]]:
 
 
 class Env:
-    """One Odoo installation: version + community root + ordered addons roots."""
-
     def __init__(
         self,
         community: str | None,
@@ -354,7 +305,6 @@ class Env:
         self.config_path = config_path
         ident = "\0".join([self.community or ""] + self.addons_roots)
         self.key = hashlib.sha1(ident.encode("utf-8", "surrogateescape")).hexdigest()[:16]
-        # runtime state, owned by the server
         self.registry: Any = None
         self.ready = threading.Event()
         self.indexing = False
@@ -362,7 +312,6 @@ class Env:
 
     @property
     def framework_dir(self) -> str | None:
-        """The ``odoo`` python package directory (for BaseModel, fields, tools...)."""
         return os.path.join(self.community, "odoo") if self.community else None
 
     @property
@@ -379,7 +328,6 @@ class Env:
         return self.root_of(path) is not None
 
     def root_of(self, path: str) -> str | None:
-        """The addons root (or framework dir) under which ``path`` lives."""
         best = None
         for r in self.addons_roots + ([self.framework_dir] if self.framework_dir else []):
             if path == r or path.startswith(r + os.sep):
@@ -397,9 +345,7 @@ def _cfg_paths(cfg_path: str, value: Any) -> list[str]:
     return [os.path.normpath(os.path.join(base, os.path.expanduser(str(v)))) for v in vals]
 
 
-# Addons roots that are Odoo's own sources (not customer code) when found next to
-# the community checkout; every other addons root is "custom" (diagnostics are
-# published for its files as soon as they are opened).
+# sibling/extra addons roots with these names are Odoo sources; others are custom (diagnostics on open)
 ODOO_SOURCE_NAMES = frozenset({"enterprise", "design-themes", "themes", "industry", "upgrade", "upgrade-util", "odoo"})
 
 
@@ -426,9 +372,8 @@ def env_from_parts(
     return Env(community, roots, version, dict.fromkeys(custom_roots), config, config_path)
 
 
+# envs are identity-stable per key (the server compares them with "is")
 class EnvManager:
-    """Discovers envs from paths and keeps them (identity-stable per key)."""
-
     def __init__(self) -> None:
         self.envs: dict[str, Env] = {}
         self._by_path_cache: dict[str, str | None] = {}
@@ -450,9 +395,6 @@ class EnvManager:
             if d in self._by_path_cache:
                 key = self._by_path_cache[d]
                 return self.envs.get(key) if key else None
-        # an already known env that contains the file wins (longest root match;
-        # envs sharing that root - e.g. a custom-modules env and the plain env of
-        # the same Odoo sources - are tie-broken by most recent use)
         best, best_rank = None, (-1, 0.0)
         for env in list(self.envs.values()):
             r = env.root_of(path)
@@ -494,8 +436,6 @@ class EnvManager:
         custom: list[str] = []
         module = module_root_of(path)
         if inside is None:
-            # custom modules: the addons roots are the parents of the modules found
-            # around the file (the config file's directory, or the module's parent)
             if scan_root:
                 scan_from = scan_root
             elif cfg_path:
@@ -513,8 +453,7 @@ class EnvManager:
                     version = root_versions.get(own) or guess_version(mods)
                 explicit = bool(cfg_path) and bool(cfg.get("odoo") or cfg.get("version"))
                 for r, rv in root_versions.items():
-                    # customer repos of other Odoo versions (e.g. two tickets side by
-                    # side) belong to other envs
+                    # roots of other Odoo versions (e.g. two tickets side by side) belong to other envs
                     if explicit or rv is None or version is None or rv == version:
                         if r not in custom and r not in extra:
                             custom.append(r)
@@ -534,13 +473,8 @@ class EnvManager:
             community = None
         return env_from_parts(community, custom, version, extra, cfg, cfg_path)
 
+    # a container of several checkouts (~/odev/worktrees) yields none: envs found lazily per file
     def envs_for_workspace(self, folder: str) -> list[Env]:
-        """Envs to pre-index for a workspace folder.
-
-        A folder inside (or configured for) one Odoo checkout, or holding custom
-        modules, yields one env. A container of several checkouts (e.g.
-        ``~/odev/worktrees``) yields none: its envs are discovered lazily per file.
-        """
         folder = os.path.normpath(folder)
         if find_community_root(folder) or find_config(folder):
             env = self.discover(folder, scan_root=folder)

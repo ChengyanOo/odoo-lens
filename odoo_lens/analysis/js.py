@@ -1,20 +1,3 @@
-"""JS analysis (``static/src/**/*.js`` ES modules): targets under the cursor.
-
-* import specifiers: the module file. ``@module/path`` -> ``<module>/static/src/path.js``
-  (or ``path/index.js``), ``@module/../tests/x`` and ``@module/../lib/x`` ->
-  ``static/tests`` / ``static/lib`` (Odoo's ``url_to_module_path``),
-  ``@odoo/owl`` & co -> their library file, relative specifiers against the file;
-* identifiers bound by an import (named, renamed, default, namespace and
-  ``ns.member``): the exported declaration in the resolved file, following
-  ``export {x} from`` / ``export * from`` re-exports (else the file itself);
-* identifiers declared at the top level of the file: their declaration;
-* ``template = "x.y"``: the owl template; ``orm.call("model", "method")`` /
-  ``resModel: "model"``: the model and method.
-
-An identifier exactly under the cursor is never traded for a neighbour: only
-a cursor on punctuation or blanks snaps to the nearest token of the line.
-"""
-
 from __future__ import annotations
 
 import os
@@ -46,7 +29,6 @@ from ..facts import (
 from .targets import FILE, METHOD, MODEL, PYSYM, TEMPLATE, Target
 from .xml import nearest
 
-# odoo.define()d libraries (``@odoo-module alias=`` / literal odoo.define names)
 LIB_ALIASES = {
     "@odoo/owl": ("web", "static/lib/owl/owl.js"),
     "@odoo/hoot": ("web", "static/lib/hoot/hoot.js"),
@@ -87,14 +69,14 @@ def targets_at(ctx: Any) -> list[Target]:
             cands.append((ref[R_COL], ref[R_END_COL], 0, ("ref", ref)))
     bindings = _file_bindings(ctx.path, facts, ctx)
     symbols = {s[S_NAME]: s for s in facts.get(SYMBOLS) or ()}
-    masked = _mask(text)  # specifiers and refs are string contents: no identifier overlaps them
+    masked = _mask(text)
     for m in _IDENT_RE.finditer(masked):
         name = m.group()
         if name in _KEYWORDS:
             continue
         c0, c1 = index_to_utf16(text, m.start()), index_to_utf16(text, m.end())
         exact = c0 <= col <= c1
-        if exact:  # exactly on an identifier: that one or nothing
+        if exact:  # on an identifier: that one or nothing, never a neighbour
             cands = [c for c in cands if c[0] <= col <= c[1]]
         item = _identifier(name, masked, m.start(), bindings, symbols)
         if item is not None:
@@ -141,9 +123,8 @@ def _ref_targets(ref: tuple) -> list[Target]:
 
 
 def _identifier(name: str, masked: str, start: int, bindings: dict, symbols: dict) -> tuple | None:
-    """What an identifier of the line refers to, or None."""
     before = masked[:start].rstrip()
-    if before.endswith(".") and not before.endswith("..."):  # property access: only namespace members resolve
+    if before.endswith(".") and not before.endswith("..."):
         owner = _OWNER_RE.search(before[:-1])
         binding = bindings.get(owner.group(1)) if owner else None
         if binding is not None and binding[1] == "*":
@@ -158,7 +139,6 @@ def _identifier(name: str, masked: str, start: int, bindings: dict, symbols: dic
 
 
 def _mask(line: str) -> str:
-    """The line with string contents and ``//`` comments blanked out."""
     out = _STRING_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1], line)
     cut = out.find("//")
     return out if cut < 0 else out[:cut] + " " * (len(out) - cut)
@@ -168,7 +148,6 @@ _BINDINGS: OrderedDict[str, tuple[dict, dict]] = OrderedDict()
 
 
 def _file_bindings(path: str, facts: dict, ctx: Any) -> dict[str, tuple[str, str]]:
-    """``import_bindings`` of the current text, cached while its facts are."""
     hit = _BINDINGS.get(path)
     if hit is not None and hit[0] is facts:
         _BINDINGS.move_to_end(path)
@@ -180,10 +159,8 @@ def _file_bindings(path: str, facts: dict, ctx: Any) -> dict[str, tuple[str, str
     return bindings
 
 
+# {local: (specifier, exported | "default" | "*")}, incl. names re-exported by `export {x as y} from`
 def import_bindings(text: str) -> dict[str, tuple[str, str]]:
-    """{local name: (specifier, exported name)} of the imports of a module
-    (exported name "default" for default imports, "*" for namespaces), plus
-    the names re-exported by ``export {x as y} from``."""
     out: dict[str, tuple[str, str]] = {}
     for m in _EXPORT_FROM_RE.finditer(text):
         if m.group(1).startswith("{"):
@@ -196,7 +173,6 @@ def import_bindings(text: str) -> dict[str, tuple[str, str]]:
 
 
 def _clause_bindings(clause: str) -> list[tuple[str, str]]:
-    """[(local, exported)] of an import/export clause."""
     out = []
     clause = clause.strip()
     if clause and clause[0] not in "{*":
@@ -218,7 +194,6 @@ def _clause_bindings(clause: str) -> list[tuple[str, str]]:
 
 
 def resolve_specifier(registry: Any, spec: str, from_path: str) -> str | None:
-    """File of a JS module specifier (see the module docstring)."""
     lib = LIB_ALIASES.get(spec)
     if lib is not None:
         info = registry.module(lib[0])
@@ -231,6 +206,7 @@ def resolve_specifier(registry: Any, spec: str, from_path: str) -> str | None:
         info = registry.module(module)
         if info is None or not rest:
             return None
+        # @mod/x -> static/src/x(.js|/index.js); @mod/../tests/x -> static/tests (url_to_module_path)
         base = os.path.normpath(os.path.join(info.path, "static", "src", rest))
     else:
         return None
@@ -241,15 +217,12 @@ def resolve_specifier(registry: Any, spec: str, from_path: str) -> str | None:
 
 
 def export_location(registry: Any, documents: Any, path: str, name: str, _depth: int = 0) -> tuple[str, int, int, int] | None:
-    """(path, line, col, end_col) of the declaration exported as ``name`` by a
-    JS module (``"default"``: the default export) or bundled library."""
     text = documents.text(path)
     if text is None:
         return None
     facts = registry.file_facts(path)
+    # bundled static/lib file: esbuild export map or CommonJS exports; the local may be renamed
     if not (facts and facts.get(KIND) == KIND_JS):
-        # bundled library (static/lib): esbuild export map (``name: () => local``)
-        # or CommonJS (``exports.name = local``); the local may be renamed (mount2)
         local = _file_index(path, text)[0].get(name)
         loc = _declaration(None, path, text, local) if local is not None else None
         if loc is not None:
@@ -264,7 +237,7 @@ def export_location(registry: Any, documents: Any, path: str, name: str, _depth:
     loc = _declaration(facts, path, text, name)
     if loc is not None or _depth >= _REEXPORT_DEPTH:
         return loc
-    for m in _EXPORT_LIST_RE.finditer(text):  # export { local as name };
+    for m in _EXPORT_LIST_RE.finditer(text):
         local = next((src for alias, src in _clause_bindings(m.group(1)) if alias == name), None)
         if local is not None:
             entry = re.search(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", m.group(1))
@@ -283,9 +256,6 @@ def export_location(registry: Any, documents: Any, path: str, name: str, _depth:
 
 
 def _declaration(facts: dict | None, path: str, text: str, name: str) -> tuple[str, int, int, int] | None:
-    """Top-level symbol ``name`` of JS facts, else the least indented ``class``/
-    ``function``/``const``/``let``/``var`` statement declaring it (bundled
-    libraries wrap their top level in a function)."""
     if facts and facts.get(KIND) == KIND_JS:
         for sym in facts.get(SYMBOLS) or ():
             if sym[S_NAME] == name:
@@ -299,8 +269,6 @@ _INDEX_SIZE = 16
 
 
 def _file_index(path: str, text: str) -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
-    """({exported name: local name} of a library export map, {name: (indent,
-    offset)} of the outermost declarations), cached while the text is unchanged."""
     hit = _INDEX.get(path)
     if hit is not None and hit[0] is text:
         _INDEX.move_to_end(path)
@@ -309,6 +277,7 @@ def _file_index(path: str, text: str) -> tuple[dict[str, str], dict[str, tuple[i
     for m in _EXPORT_MAP_RE.finditer(text):
         exports.setdefault(m.group(1) or m.group(3), m.group(2) or m.group(4))
     decls: dict[str, tuple[int, int]] = {}
+    # least indented declaration wins: bundled libraries wrap their top level in a function
     for m in _DECL_RE.finditer(text):
         indent = len(m.group(1))
         if m.group(2) not in decls or indent < decls[m.group(2)][0]:

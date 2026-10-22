@@ -1,14 +1,3 @@
-"""CSV analysis (``ir.model.access.csv``, 19.4+ ``ir.access.csv``, ``<model>.csv``
-data files): targets under the cursor.
-
-* ``id`` cells: the record's xml id (bare ids belong to the current module);
-* ``<field>:id`` / ``<field>/id`` cells (comma-separated for many2many): xml ids;
-* ``model_id`` cells holding a dotted model name (19.4+ ``ir.access.csv``): models;
-* header cells: fields of the file's model (``ir.model.access``, ``ir.access``...);
-* ``domain`` cells: the field-path segment under the cursor, on the row's model
-  (the ``model_id`` cell: a dotted name, or an implicit ``model_x`` xml id).
-"""
-
 from __future__ import annotations
 
 from ..documents import utf16_to_index
@@ -58,7 +47,7 @@ def targets_at(ctx: Any) -> list[Target]:
         idx = utf16_to_index(text, ctx.col)
         here, prev = text[idx : idx + 1], text[idx - 1 : idx] if idx else ""
         if (here.isalnum() or here == "_") or (prev.isalnum() or prev == "_"):
-            return []  # a cell token no ref covers: never trade it for a neighbouring cell
+            return []  # cell token no ref covers: never snap to a neighbouring cell
     hit = nearest(cands, ctx.col)
     if hit is None:
         return []
@@ -99,11 +88,10 @@ def _ref_targets(ctx: Any, facts: dict, ref: tuple) -> list[Target]:
 
 
 def row_model(registry: Any, module: str | None, facts: dict, line: int) -> str | None:
-    """Model a CSV row applies to: its ``model_id`` cell (dotted name, or the
-    implicit ``model_x`` xml id of a model)."""
     for ref in facts.get(REFS) or ():
         if ref[R_LINE] != line:
             continue
+        # model_id cell: dotted model name (saas-19.4+ ir.access.csv) or a model_x xml id
         if ref[R_KIND] == REF_MODEL:
             return ref[R_VALUE]
         if ref[R_KIND] == REF_XMLID and ref[R_CTX][0].startswith("model_id"):

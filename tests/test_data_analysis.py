@@ -1,9 +1,3 @@
-"""targets_at for XML / CSV / manifest / JS files, and the view-arch model
-helpers (arch_ref_model / arch_ref_candidates).
-
-Run: ODOO_LENS_CACHE_DIR=... python3.12 -m unittest tests.test_data_analysis -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -30,7 +24,6 @@ WORKTREES = os.path.expanduser(os.environ.get("ODOO_LENS_WORKTREES", "~/odev/wor
 
 
 def find(path: str, needle: str, nth: int = 0, offset: int = 0) -> tuple[int, int]:
-    """1-based (line, column) of the ``nth`` occurrence of ``needle`` (+ offset)."""
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     seen = 0
@@ -91,10 +84,6 @@ class _Base(unittest.TestCase):
         return refs[nth]
 
 
-# ---------------------------------------------------------------------------
-# tests/fixtures/mini
-
-
 class MiniXmlTests(_Base):
     SALE = "odoo/addons/sale/views/sale_order_views.xml"
     STOCK = "odoo/addons/sale_stock/views/sale_order_views.xml"
@@ -144,10 +133,8 @@ class MiniXmlTests(_Base):
         self.assertTarget(self.one(self.SALE, '<field name="res_model">', offset=14), FIELD, model="ir.actions.act_window", name="res_model")
 
     def test_lenient_columns(self):
-        # on "<field" a few columns before the name, and just after the closing quote
         self.assertTarget(self.one(self.SALE, '<field name="partner_id"'), FIELD, name="partner_id")
         self.assertTarget(self.one(self.SALE, 'partner_id"/>', offset=12), FIELD, name="partner_id")
-        # nothing meaningful within reach
         self.assertEqual(self.at(self.SALE, "<odoo>"), [])
 
     def test_inherit_id(self):
@@ -177,7 +164,6 @@ class MiniXmlTests(_Base):
         self.assertIsNone(arch_ref_model(reg, path, facts, self.ref(facts, "base.main_company")))
 
     def test_arch_ref_model_unsaved_text(self):
-        # facts of an edited (unsaved) text: the record is built from these facts
         reg = self.env.registry
         path = os.path.join(self.root, self.STOCK)
         with open(path, encoding="utf-8") as fh:
@@ -196,7 +182,6 @@ class MiniXmlTests(_Base):
         self.assertEqual(arch_ref_candidates(reg, path, facts, self.ref(facts, "no_such_field")), ["sale.order"])
 
     def test_arch_ref_candidates_from_parent_arch(self):
-        # a spec naming a field that only exists in a sub-view of the parent arch
         reg = self.env.registry
         path = os.path.join(self.root, self.MINE)
         with open(path, encoding="utf-8") as fh:
@@ -204,7 +189,6 @@ class MiniXmlTests(_Base):
         facts = extract_source(path, "xml", text.encode())
         cands = arch_ref_candidates(reg, path, facts, self.ref(facts, "price_subtotal"), text)
         self.assertEqual(cands[0], "sale.order.line")
-        # the content inserted next to it follows the located node
         self.assertEqual(arch_ref_model(reg, path, facts, self.ref(facts, "x_note"), text), "sale.order.line")
 
 
@@ -245,10 +229,6 @@ class MiniCsvManifestTests(_Base):
 
     def test_manifest_keys_are_not_targets(self):
         self.assertEqual(self.at(self.MANIFEST, "'license'", offset=2), [])
-
-
-# ---------------------------------------------------------------------------
-# synthetic tree: a copy of mini + modules exercising specs, JS, owl, assets
 
 
 EXTRA_FILES = {
@@ -457,7 +437,7 @@ class SyntheticTreeTests(_Base):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(textwrap.dedent(content).lstrip("\n"))
         old = os.environ.get("ODOO_LENS_NO_CACHE")
-        os.environ["ODOO_LENS_NO_CACHE"] = "1"  # temporary roots: keep them out of the shared cache
+        os.environ["ODOO_LENS_NO_CACHE"] = "1"
         try:
             cls.load("custom/my_views/__manifest__.py")
         finally:
@@ -474,13 +454,9 @@ class SyntheticTreeTests(_Base):
     VIEWS = "custom/my_views/views/sale_order_views.xml"
     JS = "custom/my_views/static/src/js/widget.js"
 
-    # -- inheritance specs ---------------------------------------------------
-
     def test_spec_located_in_subview(self):
-        # <field name="product_id" position="after">: product_id only exists in the order_line list
         self.assertTarget(self.one(self.VIEWS, 'name="product_id"', offset=7), FIELD, model="sale.order.line", name="product_id")
         self.assertTarget(self.one(self.VIEWS, 'name="order_id"', offset=7), FIELD, model="sale.order.line", name="order_id")
-        # display_name exists on both models: the located node decides
         t = self.one(self.VIEWS, 'name="display_name"', offset=7)
         self.assertTarget(t, FIELD, model="sale.order.line", name="display_name")
 
@@ -490,13 +466,12 @@ class SyntheticTreeTests(_Base):
         self.assertTarget(self.one(self.VIEWS, 'name="price_unit"', offset=7), FIELD, model="sale.order.line", name="price_unit")
 
     def test_attributes_spec_content_is_ignored(self):
-        # children of a position="attributes" spec are not view nodes: no ref at all
+        # children of a position="attributes" spec are not view nodes
         path, facts = self.facts(self.VIEWS)
         self.assertFalse([r for r in facts["refs"] if r[1] == "bogus"])
         self.assertEqual(self.at(self.VIEWS, 'name="bogus"', offset=7), [])
 
     def test_anchor_added_by_sibling_extension(self):
-        # product_uom_qty is added inside the order_line list by sale_stock's extension
         self.assertTarget(self.one(self.VIEWS, 'name="product_uom_qty"', offset=7), FIELD, model="sale.order.line")
         self.assertTarget(self.one(self.VIEWS, 'name="create_date"', offset=7), FIELD, model="sale.order.line", name="create_date")
 
@@ -505,7 +480,6 @@ class SyntheticTreeTests(_Base):
         self.assertTarget(self.one(self.VIEWS, 'name="no_such_method"', offset=7), METHOD, model="sale.order", name="no_such_method")
 
     def test_unlocatable_button_spec(self):
-        # locates a button the parent arch does not show as a method call (type="action", special...)
         path, facts = self.facts(self.VIEWS)
         self.assertEqual(arch_ref_candidates(self.env.registry, path, facts, self.ref(facts, "locate_only")), [])
         self.assertEqual(self.at(self.VIEWS, 'name="locate_only"', offset=7), [])
@@ -524,8 +498,6 @@ class SyntheticTreeTests(_Base):
         ref = self.ref(facts, "parent.product_uom_qty")
         self.assertEqual(arch_ref_model(self.env.registry, path, facts, ref), "sale.order.line")
 
-    # -- QWeb / owl ----------------------------------------------------------
-
     def test_server_qweb_tcall(self):
         rel = "custom/my_views/views/templates.xml"
         self.assertTarget(self.one(rel, 't-call="my_views.portal_layout"', offset=9), XMLID, xmlid="my_views.portal_layout")
@@ -537,8 +509,6 @@ class SyntheticTreeTests(_Base):
         self.assertTarget(self.one(rel, 't-name="my_views.SaleWidget"', offset=9), TEMPLATE, xmlid="my_views.SaleWidget")
         self.assertTarget(self.one(rel, 't-call="web.Helper"', offset=9), TEMPLATE, xmlid="web.Helper")
         self.assertTarget(self.one(rel, 't-inherit="my_views.SaleWidget"', offset=12), TEMPLATE, xmlid="my_views.SaleWidget")
-
-    # -- CSV -------------------------------------------------------------------
 
     def test_ir_access_csv(self):
         rel = "custom/my_views/security/ir.access.csv"
@@ -556,8 +526,6 @@ class SyntheticTreeTests(_Base):
         self.assertTarget(self.one(rel, "'partner_id'", offset=3), FIELD, model="sale.order", name="partner_id")
         self.assertTarget(self.one(rel, "sale.model_sale_order", offset=6), XMLID, xmlid="sale.model_sale_order")
 
-    # -- manifest assets -------------------------------------------------------
-
     def test_manifest_assets(self):
         rel = "custom/my_views/__manifest__.py"
         web = os.path.join(self.root, "odoo/addons/web")
@@ -570,8 +538,6 @@ class SyntheticTreeTests(_Base):
         self.assertEqual(self.at(rel, "web._assets_helpers", offset=5), [])
         self.assertTarget(self.one(rel, "'sale_stock'", offset=2), MODULE, name="sale_stock")
 
-    # -- JS ------------------------------------------------------------------
-
     def test_js_import_specifiers(self):
         web = os.path.join(self.root, "odoo/addons/web")
         self.assertTarget(self.one(self.JS, '"@web/core/utils/hooks"', offset=5), FILE, path=os.path.join(web, "static/src/core/utils/hooks.js"))
@@ -581,7 +547,7 @@ class SyntheticTreeTests(_Base):
 
     def test_js_imported_names(self):
         web = os.path.join(self.root, "odoo/addons/web")
-        t = self.one(self.JS, "useSvc(", offset=2)  # renamed import, at a call site
+        t = self.one(self.JS, "useSvc(", offset=2)
         self.assertTarget(t, PYSYM, name="useService", path=os.path.join(web, "static/src/core/utils/hooks.js"), line=0)
         self.assertEqual((t.col, t.end_col), (16, 26))
         self.assertTarget(self.one(self.JS, "registry.category", offset=3), PYSYM, name="registry", path=os.path.join(web, "static/src/core/registry.js"), line=1)
@@ -592,7 +558,7 @@ class SyntheticTreeTests(_Base):
         mine = os.path.join(self.root, "custom/my_views/static/src/js")
         self.assertTarget(self.one(self.JS, "utils.formatAmount", offset=8), PYSYM, name="formatAmount", path=os.path.join(mine, "utils.js"))
         self.assertTarget(self.one(self.JS, "new Helper", offset=6), PYSYM, name="default", path=os.path.join(mine, "helper.js"))
-        t = self.one(self.JS, "formatAmount(total)", offset=14)  # export { internalTotal as total }
+        t = self.one(self.JS, "formatAmount(total)", offset=14)
         self.assertTarget(t, PYSYM, name="total", path=os.path.join(mine, "utils.js"), line=3, col=6)
 
     def test_js_local_symbols_and_refs(self):
@@ -602,13 +568,8 @@ class SyntheticTreeTests(_Base):
         self.assertTarget(self.one(self.JS, '"action_confirm"', offset=3), METHOD, model="sale.order", name="action_confirm")
 
     def test_js_unresolved_identifier_is_not_snapped(self):
-        # exactly on a local variable: nothing, not the neighbouring import
         self.assertEqual(self.at(self.JS, "unknownLocal]]", offset=2), [])
         self.assertEqual(self.at(self.JS, "this.orm", offset=6), [])
-
-
-# ---------------------------------------------------------------------------
-# real Odoo trees
 
 
 def _tree(version: str) -> str:
@@ -629,7 +590,6 @@ class _RealTree(_Base):
         return res, (time.perf_counter() - t0) * 1000
 
     def arch_precision(self, max_ratio: float) -> None:
-        """Inherited-view <field name> refs whose candidates own the field."""
         reg = self.env.registry
         total = bad = 0
         for path, facts in reg.iter_files("xml"):
@@ -724,7 +684,6 @@ class Real20Tests(_RealTree):
         self.assertLess(ms, 100)
         self.assertTarget(self.one(self.JS, "Component,", offset=2), PYSYM, name="Component", path=os.path.join(web, "static/lib/owl/owl.js"))
         self.assertTarget(self.one(self.JS, '"web.ListRenderer"', offset=3), TEMPLATE, xmlid="web.ListRenderer")
-        # re-exported name: export { evaluate } from "./py_interpreter"
         t = self.one("odoo/addons/web/static/src/core/py_js/py.js", "export { evaluate }", offset=10)
         self.assertTarget(t, PYSYM, name="evaluate", path=os.path.join(web, "static/src/core/py_js/py_interpreter.js"))
 

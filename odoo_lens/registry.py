@@ -1,33 +1,3 @@
-"""The in-memory semantic index of one env, built from facts.
-
-Terminology
------------
-* *scope*: a ``frozenset`` of module names, normally ``closure(module)`` of the
-  module the user's file belongs to (the module and all its transitive
-  dependencies) - i.e. what is guaranteed to be loaded when that code runs.
-  ``None`` means "everything in the env" (used for files outside any module,
-  e.g. the framework, and as a fallback when a scoped lookup finds nothing).
-* *load order*: Odoo loads modules level by level of dependency depth, by name
-  within a level; every module gets a ``rank`` in that order and contributions
-  are sorted by ``(rank, path, line)``.
-
-Odoo class-composition semantics replicated here (``BaseModel._build_model``):
-* a class with ``_name = X`` whose ``_inherit`` does not contain X *defines* X;
-  the other ``_inherit`` entries are parents (mixins);
-* a class without ``_name`` and with ``_inherit = X`` (str or list: first item),
-  or with ``_name = X`` and ``X in _inherit``, *extends* X;
-* every model except ``base`` implicitly has ``base`` as last parent, so classes
-  extending ``base`` extend every model;
-* ``_inherits = {parent: m2o}`` delegates the fields (not the methods) of parent;
-* the framework classes (``BaseModel`` & co in odoo/models.py or
-  odoo/orm/models.py) close every MRO and provide magic fields and ORM methods;
-* MRO(X) = X's classes most-derived first, then each parent's MRO in order of
-  introduction, then ``base``, then the framework classes; duplicates keep their
-  LAST occurrence (Odoo's LastOrderedSet / Python C3 behaviour).
-
-Thread-safety: only the server's dispatcher thread touches a published registry.
-"""
-
 from __future__ import annotations
 
 import os
@@ -107,11 +77,10 @@ from .facts import (
     X_TAG,
 )
 
-# MemberDef and _members_of read Field, Method and ClassAttr tuples alike.
+# MemberDef and _members_of read Field, Method and ClassAttr tuples with the F_* constants alike.
 assert (F_NAME, F_LINE, F_COL, F_END_COL) == (M_NAME, M_LINE, M_COL, M_END_COL) == (A_NAME, A_LINE, A_COL, A_END_COL)
 
-# Fields every model has (16-18: synthesized by MetaModel; 19+: id/display_name
-# declared on BaseModel, log-access fields still synthesized).
+# 16-18: all from MetaModel; 19+: id/display_name declared on BaseModel, log-access from MetaModel.
 MAGIC_FIELDS = {
     "id": ("Id", None, {"string": "ID", "readonly": True}),
     "display_name": ("Char", None, {"string": "Display Name", "compute": "_compute_display_name"}),
@@ -122,16 +91,14 @@ MAGIC_FIELDS = {
     "__last_update": ("Datetime", None, {"string": "Last Modified on", "compute": "_compute_concurrency_field"}),
 }
 LOG_ACCESS_FIELDS = ("create_uid", "create_date", "write_uid", "write_date")
+# Odoo reads these from the model's own classes only, never from mixins/parents.
 OWN_CLASS_ATTRS = frozenset({"_description", "_table", "_auto", "_log_access"})
-# module sub-directories whose Python files are never imported when Odoo loads a module
 UNLOADED_DIRS = frozenset({"tests", "migrations", "upgrades", "upgrade", "static"})
 _CAMEL = re.compile(r"(?<=[^_])([A-Z])")
 _MAGIC_ADD = re.compile(rb"\badd(?:_default)?\(\s*(?:'(\w+)'|(self\.CONCURRENCY_CHECK_FIELD))")
 
 
 def _magic_positions(path: str) -> dict[str, tuple[int, int, int]]:
-    """(line, col, end_col) of the name of each magic field added by MetaModel in
-    ``path`` (the framework file defining BaseModel)."""
     try:
         with open(path, "rb") as fh:
             src = fh.read()
@@ -158,37 +125,34 @@ FRAMEWORK_CHAINS = {
 
 
 class ModuleInfo:
-    """A module (addon) of the env."""
-
     __slots__ = ("name", "path", "root", "manifest", "depends", "depth", "rank", "values")
 
     def __init__(self, name: str, path: str, root: str):
         self.name = name
-        self.path = path  # module directory
-        self.root = root  # addons root containing it
+        self.path = path
+        self.root = root
         self.manifest = os.path.join(path, "__manifest__.py")
-        self.depends: tuple[str, ...] = ()  # direct dependencies (manifest 'depends'; base implied)
-        self.depth = 0  # 0 for base, 1 + max(depth of deps) otherwise
-        self.rank = 0  # position in load order
-        self.values: dict = {}  # literal manifest values (name, version, summary, ...)
+        self.depends: tuple[str, ...] = ()
+        self.depth = 0
+        self.rank = 0
+        self.values: dict = {}
 
     def __repr__(self) -> str:
         return f"<Module {self.name} rank={self.rank}>"
 
 
 class ClassRef:
-    """One Python class contributing to a model (or a framework model class)."""
-
+    # framework classes: module None, model '', rank -1
     __slots__ = ("path", "index", "module", "facts", "model", "is_definition", "rank")
 
     def __init__(self, path: str, index: int, module: str | None, facts: tuple, model: str, is_definition: bool, rank: int):
         self.path = path
-        self.index = index  # index in the file's CLASSES list
-        self.module = module  # None for framework classes
-        self.facts = facts  # the Class tuple (K_* constants)
-        self.model = model  # model name this class contributes to ('' for framework classes)
-        self.is_definition = is_definition  # True if it introduces the model (_name, not an extension)
-        self.rank = rank  # module load rank (framework classes: -1)
+        self.index = index
+        self.module = module
+        self.facts = facts
+        self.model = model
+        self.is_definition = is_definition
+        self.rank = rank
 
     @property
     def model_info(self) -> dict:
@@ -210,16 +174,14 @@ class ClassRef:
 
 
 class MemberDef:
-    """A field / method / class attribute definition found in a ClassRef."""
-
     __slots__ = ("kind", "name", "cls", "facts", "delegated_via")
 
     def __init__(self, kind: str, name: str, cls: ClassRef, facts: tuple, delegated_via: str | None = None):
-        self.kind = kind  # "field" | "method" | "attr"
+        self.kind = kind
         self.name = name
         self.cls = cls
-        self.facts = facts  # Field / Method / ClassAttr tuple
-        self.delegated_via = delegated_via  # for _inherits: the m2o field name on the child model
+        self.facts = facts
+        self.delegated_via = delegated_via
 
     @property
     def path(self) -> str:
@@ -250,16 +212,15 @@ class MemberDef:
 
 
 class RecordRef:
-    """An XML/CSV record (or owl template) definition."""
-
+    # xmlid: qualified 'module.name' (bare t-name for qweb templates); index -1: implicit record
     __slots__ = ("xmlid", "path", "index", "module", "facts")
 
     def __init__(self, xmlid: str, path: str, index: int, module: str | None, facts: tuple):
-        self.xmlid = xmlid  # fully qualified 'module.name' (t-name for owl templates)
+        self.xmlid = xmlid
         self.path = path
-        self.index = index  # index in the file's RECORDS list (-1 for implicit records)
+        self.index = index
         self.module = module
-        self.facts = facts  # Record tuple (X_* constants)
+        self.facts = facts
 
     @property
     def model(self) -> str | None:
@@ -290,14 +251,12 @@ class RecordRef:
 
 
 class RefHit:
-    """A reference (Ref tuple) located in a file."""
-
     __slots__ = ("path", "module", "facts")
 
     def __init__(self, path: str, module: str | None, facts: tuple):
         self.path = path
         self.module = module
-        self.facts = facts  # Ref tuple (R_* constants)
+        self.facts = facts
 
     @property
     def kind(self) -> str:
@@ -331,12 +290,8 @@ def _import_key(facts: dict) -> list:
     return [i[:I_LINE] for i in facts.get(IMPORTS) or ()]
 
 
+# 19+ module_graph: a test_* module loads right after its last-loaded dependency (same depth).
 def _load_keys(modules: dict[str, ModuleInfo], test_rule: bool = False) -> dict[str, tuple[int, str]]:
-    """Load-order key ``(depth, order_name)`` of every module: depth is 0 for
-    base, else 1 + max over known deps (iteratively, cycles count as depth 0);
-    modules load sorted by it. With ``test_rule`` (19+ ``module_graph``), a
-    ``test_*`` module loads right after its last loaded dependency: its depth,
-    and its name prefixed by that dependency's order name."""
     keys: dict[str, tuple[int, str]] = {}
     for start in modules:
         if start in keys:
@@ -362,13 +317,8 @@ def _load_keys(modules: dict[str, ModuleInfo], test_rule: bool = False) -> dict[
     return keys
 
 
+# No _name: str _inherit -> it; list -> 16-18 sole parent else class name, 19+ dotted class name.
 def model_class_info(facts: tuple, major: int | None = None) -> tuple[str | None, bool, list[str]]:
-    """(model, is_definition, parents) for a Class tuple with model info.
-
-    ``_name`` defaulting (MetaModel.__new__): a str ``_inherit`` implies
-    ``_name``; for a list ``_inherit`` without ``_name``, 16-18 use the single
-    parent (the class name verbatim with several parents) and 19+ derive the
-    name from the class name (``HrEmployee`` -> ``hr.employee``)."""
     mi = facts[K_MODEL]
     if not mi:
         return None, False, []
@@ -386,15 +336,15 @@ def model_class_info(facts: tuple, major: int | None = None) -> tuple[str | None
     return name, name not in inherit, [p for p in inherit if p != name]
 
 
+# Only the dispatcher thread touches a published registry.
+# scope: frozenset of module names (usually closure of the file's module); None = whole env.
 class Registry:
-    """Semantic index of one env. Built once from all facts, then updated per file."""
-
     def __init__(self, env: Any, files: dict[str, dict], module_dirs: dict[str, str]):
         self.env = env
-        self.files = files  # abs path -> facts
-        self.module_dirs: dict[str, str] = dict(module_dirs)  # module name -> dir
-        self.file_stats: dict[str, tuple[int, int]] = {}  # set by the indexer
-        self.shards: dict[str, dict] = {}  # set by the indexer
+        self.files = files
+        self.module_dirs: dict[str, str] = dict(module_dirs)
+        self.file_stats: dict[str, tuple[int, int]] = {}
+        self.shards: dict[str, dict] = {}
         self.generation = 0
         self._cache: dict = {}
         self._path_module: dict[str, str | None] = {}
@@ -407,21 +357,20 @@ class Registry:
         self._model_classes: dict[str, list[ClassRef]] = defaultdict(list)
         self._dirty_models: set[str] = set()
         self._framework: dict[str, ClassRef] = {}
-        self._children: dict[str, set[str]] = defaultdict(set)  # parent model -> models having it as parent
-        self._members: dict[str, set[str]] = defaultdict(set)  # member name -> models ('' = framework)
+        self._children: dict[str, set[str]] = defaultdict(set)
+        self._members: dict[str, set[str]] = defaultdict(set)  # name -> models ('' = framework)
         self._xmlids: dict[str, list[RecordRef]] = defaultdict(list)
         self._templates: dict[str, list[RecordRef]] = defaultdict(list)
         self._view_children: dict[str, list[RecordRef]] = defaultdict(list)
-        self._refs: dict[tuple[str, str], list[tuple[str, tuple]]] = defaultdict(list)  # (kind, key) -> [(path, ref)]
-        self._py_modules: dict[str, str] = {}  # dotted -> path
-        self._py_dotted: dict[str, str] = {}  # path -> dotted
-        self._contrib: dict[str, tuple] = {}  # path -> (classes, records) the file added
+        self._refs: dict[tuple[str, str], list[tuple[str, tuple]]] = defaultdict(list)
+        self._py_modules: dict[str, str] = {}
+        self._py_dotted: dict[str, str] = {}
+        self._contrib: dict[str, tuple] = {}
         self._loaded = self._compute_loaded()
         for path, facts in self.files.items():
             self._add_file(path, facts)
 
     def _import_targets(self, path: str) -> list[str]:
-        """Python files imported (at module level) by ``path``, in source order."""
         facts = self.files.get(path)
         if not facts or facts.get(KIND) != KIND_PY:
             return []
@@ -453,12 +402,8 @@ class Registry:
                         out.append(cand)
         return out
 
+    # Post-order import walk from each __init__.py = registration order; unreached files never load.
     def _compute_loaded(self) -> dict[str, int]:
-        """Python files Odoo actually imports when loading each module (everything
-        reachable through imports from the module's ``__init__.py``), mapped to
-        their execution order: a post-order walk of the imports in source order,
-        i.e. the order in which their classes get defined (and registered).
-        Model classes in other files (forgotten imports, scripts) never register."""
         order: dict[str, int] = {}
         counter = 0
         for info in self._modules.values():
@@ -482,37 +427,26 @@ class Registry:
         return order
 
     def is_loaded(self, path: str) -> bool:
-        """False for a module's .py file that no import chain from its __init__.py reaches."""
         module = self.module_of_path(path)
         if module is None:
             return True
         return path in self._loaded
-
-    # =====================================================================
-    # maintenance
 
     def _bump(self) -> None:
         self.generation += 1
         self._cache.clear()
 
     def update_file(self, path: str, facts: dict) -> None:
-        """Replace the facts of one file (new or changed) and update every index."""
         self.update_files({path: facts})
 
     def remove_file(self, path: str) -> None:
         self.update_files({path: None})
 
     def set_modules(self, module_dirs: dict[str, str]) -> None:
-        """Module set changed (module added/removed): recompute everything."""
         self.update_files({}, module_dirs, force=True)
 
+    # Incremental unless the module set or loaded-file set changes: then ONE full rebuild per batch.
     def update_files(self, changes: dict[str, dict | None], module_dirs: dict[str, str] | None = None, force: bool = False) -> None:
-        """Apply many file changes at once (facts, or None for a removed file),
-        optionally with a new module set.
-
-        Incremental per file unless the module set or the set of files reachable
-        from the modules' ``__init__.py`` changes - then ONE full rebuild covers
-        the whole batch (a git checkout adding modules must not rebuild per file)."""
         full = force or (module_dirs is not None and module_dirs != self.module_dirs)
         check_loaded = False
         manifests = False
@@ -534,7 +468,7 @@ class Registry:
             else:
                 self.files[path] = facts
         if not full and check_loaded and self._compute_loaded() != self._loaded:
-            full = True  # a file became (un)reachable: re-register everything
+            full = True
         if full:
             if module_dirs is not None:
                 self.module_dirs = dict(module_dirs)
@@ -545,7 +479,7 @@ class Registry:
             return
         if manifests:
             self._compute_graph()
-            for lst in self._model_classes.values():  # ranks may have changed
+            for lst in self._model_classes.values():
                 for c in lst:
                     c.rank = self._rank(c.module)
             self._dirty_models.update(self._model_classes)
@@ -583,7 +517,6 @@ class Registry:
             info = modules[name]
             info.depth = keys[name][0]
             info.rank = rank
-        # load order of each module's data files: manifest 'data' then 'demo'
         self._data_order: dict[str, int] = {}
         for info in modules.values():
             facts = self.files.get(info.manifest)
@@ -601,7 +534,7 @@ class Registry:
             if rk == REF_FIELD or rk == REF_METHOD:
                 role = ref[R_CTX][0]
                 if role == "record" or role == "csv_header":
-                    continue  # high-volume: searched on demand (see refs_in_records)
+                    continue  # high-volume: references._Search scans these on demand
                 v = ref[R_VALUE]
                 if "." in v:
                     for seg in v.split("."):
@@ -634,7 +567,7 @@ class Registry:
                 if not mi:
                     continue
                 if not loaded and mi.get(MI_KIND) != "framework":
-                    continue  # tests/migrations: never part of the registry
+                    continue
                 if (mi.get(MI_ATTRS) or {}).get("_register") is False and mi.get(MI_KIND) != "framework":
                     continue
                 if mi.get(MI_KIND) == "framework":
@@ -676,7 +609,8 @@ class Registry:
                     continue
                 if rec[X_TAG] == "qweb":
                     r = RecordRef(xid, path, idx, module, rec)
-                    if (rec[X_INFO] or {}).get("mode") != "extension":  # an extension only patches its parent
+                    # an extension only patches its parent
+                    if (rec[X_INFO] or {}).get("mode") != "extension":
                         self._templates[xid].append(r)
                     records.append(r)
                     inherit = (rec[X_INFO] or {}).get("inherit")
@@ -757,9 +691,6 @@ class Registry:
         if dotted and self._py_modules.get(dotted) == path:
             del self._py_modules[dotted]
 
-    # =====================================================================
-    # modules
-
     def module(self, name: str | None) -> ModuleInfo | None:
         return self._modules.get(name) if name else None
 
@@ -767,7 +698,6 @@ class Registry:
         return self._modules.values()
 
     def module_of_path(self, path: str) -> str | None:
-        """Name of the module containing ``path`` (None for framework / foreign files)."""
         try:
             return self._path_module[path]
         except KeyError:
@@ -788,7 +718,6 @@ class Registry:
         return found
 
     def closure(self, module: str) -> frozenset[str]:
-        """``module`` + all transitive dependencies (cached)."""
         key = ("closure", module)
         hit = self._cache.get(key)
         if hit is not None:
@@ -808,7 +737,6 @@ class Registry:
         return res
 
     def dependents(self, module: str) -> frozenset[str]:
-        """All modules depending (transitively) on ``module`` (cached)."""
         key = ("dependents", module)
         hit = self._cache.get(key)
         if hit is not None:
@@ -833,12 +761,8 @@ class Registry:
         return res
 
     def scope_for_path(self, path: str) -> frozenset[str] | None:
-        """``closure(module_of_path(path))`` or None outside modules."""
         mod = self.module_of_path(path)
         return self.closure(mod) if mod else None
-
-    # =====================================================================
-    # models
 
     def _sorted_classes(self, model: str) -> list[ClassRef]:
         lst = self._model_classes.get(model)
@@ -862,7 +786,6 @@ class Registry:
         return any(c.module in scope for c in lst)
 
     def model_classes(self, model: str, scope: frozenset[str] | None = None) -> list[ClassRef]:
-        """Classes contributing directly to ``model`` (definition + extensions), load order."""
         lst = self._sorted_classes(model)
         if scope is None:
             return list(lst)
@@ -872,7 +795,6 @@ class Registry:
         return [c for c in self.model_classes(model, scope) if c.is_definition]
 
     def model_parents(self, model: str, scope: frozenset[str] | None = None) -> list[str]:
-        """Parent models (mixins) of ``model`` in order of introduction, without ``base``."""
         out: list[str] = []
         for c in self.model_classes(model, scope):
             for p in c.parents():
@@ -881,7 +803,6 @@ class Registry:
         return out
 
     def model_inherits(self, model: str, scope: frozenset[str] | None = None) -> dict[str, str]:
-        """Merged ``_inherits`` {parent_model: m2o_field} (including inherited ones)."""
         key = ("inherits", model, scope)
         hit = self._cache.get(key)
         if hit is not None:
@@ -892,29 +813,25 @@ class Registry:
                 continue
             for parent, fname in (c.model_info.get(MI_INHERITS) or {}).items():
                 out.setdefault(parent, fname)
-            for f in c.facts[K_FIELDS]:  # Many2one(..., delegate=True) is reflected into _inherits
+            for f in c.facts[K_FIELDS]:
                 if f[F_COMODEL] and (f[F_ARGS] or {}).get("delegate") is True:
                     out.setdefault(f[F_COMODEL], f[F_NAME])
         self._cache[key] = out
         return out
 
     def model_children(self, model: str) -> list[str]:
-        """Models listing ``model`` among their parents (e.g. mail.thread -> sale.order, ...)."""
         return sorted(m for m in self._children.get(model, ()) if m in self._model_classes)
 
+    # Odoo's _build_model bases: per class in load order, LastOrderedSet([cls] + each _inherit + base),
+    # where _inherit == model splices in the previous bases. Entries: ("c", ClassRef) | ("m", parent).
     def _bases(self, model: str, scope: frozenset[str] | None) -> list[tuple[str, Any]]:
-        """Bases of the registry class of ``model`` as Odoo builds them
-        (``add_to_registry``/``_build_model``): for each contributing class in load
-        order, ``LastOrderedSet([cls])`` extended with, for every ``_inherit`` entry
-        as written (+ 'base'), the previous bases when the entry is the model itself,
-        else the parent's registry class. Entries: ("c", ClassRef) | ("m", parent)."""
         key = ("bases", model, scope)
         hit = self._cache.get(key)
         if hit is not None:
             return hit
         bases: dict[tuple, tuple[str, Any]] = {}
         for c in self.model_classes(model, scope):
-            new: dict[tuple, tuple[str, Any]] = {("c", id(c)): ("c", c)}  # LastOrderedSet: re-adding moves to the end
+            new: dict[tuple, tuple[str, Any]] = {("c", id(c)): ("c", c)}
             parents = list(c.model_info.get(MI_INHERIT) or ())
             if model != "base":
                 parents.append("base")
@@ -933,7 +850,6 @@ class Registry:
         return res
 
     def model_mro(self, model: str, scope: frozenset[str] | None = None) -> list[ClassRef]:
-        """Full linearization, most-derived first, ending with the framework classes."""
         key = ("mro", model, scope)
         hit = self._cache.get(key)
         if hit is not None:
@@ -941,8 +857,7 @@ class Registry:
         out: list[ClassRef] = []
         roots = [model] if model == "base" or self._model_classes.get(model) else [model, "base"]
         for root in roots:
-            # depth-first expansion of the base lists, iterative (no recursive closure:
-            # it would form a garbage cycle holding the registry)
+            # iterative: a recursive closure would form a garbage cycle holding the registry
             visiting = {root}
             stack = [(root, iter(self._bases(root, scope)))]
             while stack:
@@ -957,6 +872,7 @@ class Registry:
                 elif entry[1] not in visiting:
                     visiting.add(entry[1])
                     stack.append((entry[1], iter(self._bases(entry[1], scope))))
+        # duplicates keep their LAST occurrence (LastOrderedSet / C3)
         seen: set[int] = set()
         res: list[ClassRef] = []
         for c in reversed(out):
@@ -979,11 +895,9 @@ class Registry:
         return out
 
     def framework_classes(self) -> list[ClassRef]:
-        """BaseModel & friends (root of every MRO)."""
         return list(self._framework.values())
 
     def inherits_from(self, model: str, ancestor: str, scope: frozenset[str] | None = None) -> bool:
-        """True if ``ancestor`` is ``model`` or one of its (recursive) parents / _inherits."""
         if model == ancestor or ancestor == "base":
             return True
         key = ("ancestors", model, scope)
@@ -1001,11 +915,6 @@ class Registry:
         return ancestor in anc
 
     def model_attr(self, model: str, attr: str, scope: frozenset[str] | None = None) -> Any:
-        """Effective literal model attribute (``_description``, ``_order``, ``_rec_name``...).
-
-        ``_description``, ``_table``, ``_auto`` and ``_log_access`` only come from
-        the model's own classes (Odoo ignores mixins/parents for them); other
-        attributes follow the Python MRO."""
         classes = reversed(self.model_classes(model, scope)) if attr in OWN_CLASS_ATTRS else self.model_mro(model, scope)
         for c in classes:
             attrs = c.model_info.get(MI_ATTRS) or {}
@@ -1014,7 +923,6 @@ class Registry:
         return None
 
     def model_kind(self, model: str) -> str | None:
-        """"Model" | "AbstractModel" | "TransientModel" (from the defining class)."""
         lst = self._sorted_classes(model)
         for c in lst:
             if c.is_definition and c.model_info.get(MI_KIND):
@@ -1024,9 +932,7 @@ class Registry:
                 return c.model_info.get(MI_KIND)
         return None
 
-    # =====================================================================
-    # members
-
+    # name -> defs, most-derived first; _inherits parents only add names the model lacks
     def _members_of(self, model: str, scope: frozenset[str] | None, which: str) -> dict[str, list[MemberDef]]:
         key = (which, model, scope)
         hit = self._cache.get(key)
@@ -1042,7 +948,8 @@ class Registry:
             for parent, m2o in self.model_inherits(model, scope).items():
                 if parent == model:
                     continue
-                if m2o not in out and (self._major or 0) < 19:  # 16-18 create the _inherits many2one automatically
+                # 16-18 create the _inherits m2o automatically
+                if m2o not in out and (self._major or 0) < 19:
                     owner = self._class_declaring(model, scope, "_inherits")
                     if owner is not None:
                         a = next((x for x in owner.facts[K_ATTRS] if x[A_NAME] == "_inherits"), None)
@@ -1062,13 +969,8 @@ class Registry:
                 return c
         return None
 
+    # own _log_access, else _auto; unset -> True even if abstract, so mixin self.create_uid resolves
     def _log_access(self, model: str, scope: frozenset[str] | None) -> bool:
-        """``_log_access`` (else ``_auto``) as set by the model's OWN classes -
-        Odoo ignores the values of mixins/parents for these attributes. When
-        neither is set this returns True, also for abstract models (where Odoo
-        adds no log-access fields): the magic fields stay visible on mixins so
-        that ``self.create_uid`` in mixin code navigates and hovers. Diagnostics
-        applies Odoo's own default instead."""
         auto = None
         for c in reversed(self.model_classes(model, scope)):
             attrs = c.model_info.get(MI_ATTRS) or {}
@@ -1092,7 +994,7 @@ class Registry:
                     break
             self._cache["metamodel_pos"] = meta_pos
         magic_pos = self._cache.get("magic_pos")
-        if magic_pos is None:  # the ``add('id', ...)`` / ``add_default('create_uid', ...)`` lines
+        if magic_pos is None:
             magic_pos = self._cache["magic_pos"] = _magic_positions(base.path)
         log_access = None
         for name, (ftype, comodel, args) in MAGIC_FIELDS.items():
@@ -1112,7 +1014,6 @@ class Registry:
             out[name] = [MemberDef("field", name, anchor, (name, pos[0], pos[1], pos[2], pos[0], ftype, comodel, fargs))]
 
     def fields(self, model: str, scope: frozenset[str] | None = None) -> dict[str, list[MemberDef]]:
-        """All fields of ``model`` (name -> definitions, most-derived first)."""
         return self._members_of(model, scope, "field")
 
     def methods(self, model: str, scope: frozenset[str] | None = None) -> dict[str, list[MemberDef]]:
@@ -1122,24 +1023,18 @@ class Registry:
         return self._members_of(model, scope, "attr")
 
     def field(self, model: str, name: str, scope: frozenset[str] | None = None) -> list[MemberDef]:
-        """All definitions of field ``name`` visible on ``model``: own MRO first
-        (most-derived first), then fields delegated through ``_inherits``."""
         return self._members_of(model, scope, "field").get(name, [])
 
     def method(self, model: str, name: str, scope: frozenset[str] | None = None) -> list[MemberDef]:
-        """All definitions of method ``name`` in the MRO of ``model``, most-derived first."""
         return self._members_of(model, scope, "method").get(name, [])
 
     def attr(self, model: str, name: str, scope: frozenset[str] | None = None) -> list[MemberDef]:
         return self._members_of(model, scope, "attr").get(name, [])
 
     def member(self, model: str, name: str, scope: frozenset[str] | None = None) -> list[MemberDef]:
-        """field(), else method(), else attr() - whichever is non-empty first."""
         return self.field(model, name, scope) or self.method(model, name, scope) or self.attr(model, name, scope)
 
     def field_info(self, model: str, name: str, scope: frozenset[str] | None = None) -> dict | None:
-        """Effective field: {"type", "comodel", "args" (merged, base-most first,
-        overridden by more derived definitions), "defs": [MemberDef]}."""
         defs = self.field(model, name, scope)
         if not defs:
             return None
@@ -1149,8 +1044,6 @@ class Registry:
         return {"type": defs[0].facts[F_TYPE], "comodel": self.comodel(model, name, scope), "args": args, "defs": defs}
 
     def comodel(self, model: str, name: str, scope: frozenset[str] | None = None, _depth: int = 0) -> str | None:
-        """Comodel of a relational field; follows ``related=`` when the field
-        declares no comodel (``company_id = fields.Many2one(related='order_id.company_id')``)."""
         defs = self.field(model, name, scope)
         for d in defs:
             if d.facts[F_COMODEL]:
@@ -1171,10 +1064,6 @@ class Registry:
         return None
 
     def walk_path(self, model: str, path: str, scope: frozenset[str] | None = None) -> list[tuple[str, str | None, list[MemberDef]]]:
-        """Resolve a dotted field path segment by segment.
-
-        Returns [(segment, model_owning_segment, definitions)]; resolution stops
-        after the first unresolved segment (empty definitions)."""
         out = []
         cur: str | None = model
         for seg in path.split("."):
@@ -1189,14 +1078,9 @@ class Registry:
         return out
 
     def models_with_member(self, name: str) -> list[str]:
-        """Models (and '' for framework classes) defining a field/method/attr named ``name``."""
         return sorted(self._members.get(name, ()))
 
-    # =====================================================================
-    # XML ids / records
-
     def qualify_xmlid(self, raw: str, module: str | None) -> str:
-        """'x' -> '<module>.x'; 'm.x' unchanged."""
         if "." in raw or not module:
             return raw
         return f"{module}.{raw}"
@@ -1211,8 +1095,6 @@ class Registry:
         return hit
 
     def implicit_record(self, xmlid: str) -> list[RecordRef]:
-        """Records Odoo creates implicitly: <module>.model_<model_> and
-        <module>.field_<model_>__<field> (module = a module contributing to it)."""
         module, _, local = xmlid.partition(".")
         if not local:
             return []
@@ -1237,7 +1119,6 @@ class Registry:
         return out
 
     def records(self, xmlid: str) -> list[RecordRef]:
-        """Definitions of a fully-qualified xml id (load order), implicit ones last."""
         lst = self._xmlids.get(xmlid)
         order = self._data_order
         explicit = sorted(lst, key=lambda r: (self._rank(r.module), order.get(r.path, 1 << 20), r.path, r.line)) if lst else []
@@ -1271,11 +1152,9 @@ class Registry:
         return list(self._templates)
 
     def templates(self, name: str) -> list[RecordRef]:
-        """Owl/QWeb client templates by t-name."""
         return list(self._templates.get(name, ()))
 
     def view_model(self, record: RecordRef, _depth: int = 0) -> str | None:
-        """Model of an ir.ui.view record (follows inherit_id when no model is set)."""
         info = record.info
         vm = info.get("view_model")
         if vm:
@@ -1303,27 +1182,21 @@ class Registry:
         return list(idx.get(model, ()))
 
     def children_views(self, xmlid: str) -> list[RecordRef]:
-        """Views/templates whose inherit_id is ``xmlid`` (or owl templates t-inheriting it)."""
         out = list(self._view_children.get(xmlid, ()))
         out += self._view_children.get("qweb:" + xmlid, ())
         return out
 
     def model_xmlid(self, model: str) -> str | None:
-        """Implicit xml id of a model: '<defining module>.model_<model with _>'."""
         for c in self._sorted_classes(model):
             if c.is_definition and c.module:
                 return f"{c.module}.model_{model.replace('.', '_')}"
         return None
-
-    # =====================================================================
-    # references
 
     def _hits(self, kind: str, key: str) -> list[RefHit]:
         return [RefHit(p, self.module_of_path(p), r) for p, r in self._refs.get((kind, key), ())]
 
     def refs_to_model(self, model: str) -> list[RefHit]:
         out = self._hits(REF_MODEL, model)
-        # implicit xml ids model_<model_> used in csv/xml
         underscored = "model_" + model.replace(".", "_")
         for (kind, key), hits in self._refs.items():
             if kind == REF_XMLID and key.endswith(underscored) and key.split(".", 1)[-1] == underscored:
@@ -1337,14 +1210,10 @@ class Registry:
         return self._hits(REF_QWEB, name) + self._hits(REF_XMLID, name)
 
     def refs_by_name(self, kind: str, name: str) -> list[RefHit]:
-        """REF_FIELD / REF_METHOD refs having ``name`` as one of their path segments."""
         return self._hits(kind, name)
 
     def refs_to_module(self, module: str) -> list[RefHit]:
         return self._hits(REF_MODULE, module)
-
-    # =====================================================================
-    # python modules
 
     def _dotted_for(self, path: str, module: str | None) -> str | None:
         if not path.endswith(".py"):
@@ -1363,7 +1232,6 @@ class Registry:
         return ".".join(parts)
 
     def py_module_file(self, dotted: str) -> str | None:
-        """'odoo.addons.sale.models.sale_order' -> file path (module.py or pkg/__init__.py)."""
         return self._py_modules.get(dotted)
 
     def py_dotted_name(self, path: str) -> str | None:
@@ -1376,9 +1244,6 @@ class Registry:
         for path, facts in self.files.items():
             if kind is None or facts.get(KIND) == kind:
                 yield path, facts
-
-    # =====================================================================
-    # misc
 
     def stats(self) -> dict:
         return {

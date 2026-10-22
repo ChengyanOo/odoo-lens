@@ -1,16 +1,3 @@
-"""Hover: compact markdown cards explaining the Odoo symbol under the cursor.
-
-Hover is Claude's richest channel (rendered verbatim, never filtered), so a card
-packs what would otherwise take several file reads: the merged attributes of a
-field over all its definitions, the override chain of a method with its
-``super()`` calls, the composition of a model, the details of a record / view,
-module metadata. Locations are absolute ``path:line`` (1-based) so they can be
-opened directly. Lookups use the dependency closure of the current module;
-definitions outside it are reported separately (they only apply when those
-modules are installed). Cards stay under ~40 lines: lists are truncated with
-"+N more".
-"""
-
 from __future__ import annotations
 
 import ast
@@ -74,6 +61,7 @@ from .navigation import (
     view_implementations,
 )
 
+# Claude renders hover verbatim: absolute 1-based path:line refs, cards under ~40 lines ("+N more").
 MAX_OVERRIDES = 8
 MAX_CHAIN = 12
 MAX_FULL_CHAIN = 25
@@ -82,17 +70,14 @@ MAX_SELECTION = 12
 SNIPPET_LINES = 6
 VALUE_WIDTH = 100
 
-# field arguments rendered as flags, in this order
 FLAG_ARGS = (
     "required", "readonly", "store", "index", "translate", "company_dependent", "tracking", "copy",
     "groups", "precompute", "compute_sudo", "recursive", "delegate", "ondelete", "check_company",
     "auto_join", "bypass_search_access", "aggregator", "group_operator", "size", "digits",
     "currency_field", "sanitize", "attachment", "change_default",
 )
-# field arguments rendered as their own "key: value" line, in this order
 DETAIL_ARGS = ("related", "compute", "inverse", "search", "default", "domain", "context", "inverse_name", "relation", "group_expand", "compute_sql")
 METHOD_NAME_ARGS = frozenset({"compute", "inverse", "search", "group_expand", "compute_sql"})
-# arguments that only document a definition (never shown as "changed" in overrides)
 SILENT_ARGS = frozenset({"comodel_name", "automatic"})
 VIEW_TYPE_RE = re.compile(r"<\s*([A-Za-z_][\w\-]*)")
 ARCH_RE = re.compile(r"""<field\b[^>]*\bname\s*=\s*["']arch(?:_db)?["']""")
@@ -113,7 +98,6 @@ def hover(ctx: Any) -> dict | None:
 
 
 def hover_for_target(ctx: Any, target: Target) -> str | None:
-    """Markdown card for one target (None when there is nothing to say)."""
     kind = target.kind
     if kind in (FIELD, METHOD, ATTR) and not target.model:
         return _ambiguous_card(ctx, target)
@@ -156,7 +140,6 @@ def _other_card(ctx: Any, target: Target) -> str | None:
 
 
 def _missing(ctx: Any, target: Target) -> str:
-    """Card for a symbol the env does not define (typo, missing module)."""
     if target.kind == MODEL:
         return f"**{target.model}** · ⚠ model not found in this environment"
     if target.kind in (XMLID, TEMPLATE):
@@ -167,16 +150,12 @@ def _missing(ctx: Any, target: Target) -> str:
     return f"**{target.model}.{target.name}** · ⚠ no {what} `{target.name}` on {target.model} in this environment"
 
 
-# ---------------------------------------------------------------------------
-# formatting helpers
-
-
 def _at(path: str, line: int) -> str:
     return f"{path}:{line + 1}"
 
 
 def _mod(module: str | None) -> str:
-    return module or "odoo"  # framework classes (BaseModel...) belong to no module
+    return module or "odoo"  # framework classes (BaseModel...) have no module
 
 
 def _clip(text: str, width: int = VALUE_WIDTH) -> str:
@@ -185,7 +164,6 @@ def _clip(text: str, width: int = VALUE_WIDTH) -> str:
 
 
 def _value(v: Any, width: int = VALUE_WIDTH) -> str:
-    """Source-like rendering of a facts literal (``("=", src)`` holds an expression)."""
     return _clip(v[1] if _is_expr(v) else repr(v), width)
 
 
@@ -195,12 +173,11 @@ def _more(items: list[str], limit: int, sep: str = ", ") -> str:
 
 
 def _snippet(ctx: Any, path: str, start: int, end: int, name: str | None = None) -> list[str]:
-    """Up to SNIPPET_LINES source lines as a fenced block; with ``name``, only if
-    the first line really assigns/defines it (synthesized members have none)."""
     lines = ctx.server.documents.lines(path)
     if not lines or not 0 <= start < len(lines):
         return []
     chunk = lines[start : min(end, start + SNIPPET_LINES - 1) + 1]
+    # synthesized members have no source: show only if the first line defines name
     if name is not None and not re.match(rf"\s*(?:def\s+|async\s+def\s+)?{re.escape(name)}\b", chunk[0]):
         return []
     body = textwrap.dedent("\n".join(l.rstrip("\r") for l in chunk)).rstrip()
@@ -217,9 +194,8 @@ def _not_visible(modules: list[str]) -> str:
     return f"⚠ defined only in modules outside this module's dependencies: {_more(modules, MAX_LIST)}"
 
 
+# (defs, False): found only outside the dependency closure.
 def _visible(lookup: Callable, model: str, name: str, scope: frozenset[str] | None) -> tuple[list, bool]:
-    """Definitions visible from ``scope``; when there are none, those of the
-    whole env, flagged False (defined only outside the dependency closure)."""
     defs = lookup(model, name, scope)
     if defs or scope is None:
         return defs, True
@@ -227,17 +203,10 @@ def _visible(lookup: Callable, model: str, name: str, scope: frozenset[str] | No
 
 
 def _outside_overrides(registry: Any, model: str, name: str, scope: frozenset[str] | None, index: int, kind: str) -> list[MemberDef]:
-    """Definitions of ``name`` in classes of ``model`` itself contributed by
-    modules outside ``scope`` (load order) - what applies only if they are
-    installed."""
     if scope is None:
         return []
     key = MEMBER_NAME[index]
     return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) if c.module not in scope for m in c.facts[index] if m[key] == name]
-
-
-# ---------------------------------------------------------------------------
-# fields
 
 
 def field_card(ctx: Any, model: str | None, name: str) -> str | None:
@@ -303,7 +272,6 @@ def _field_flags(args: dict) -> list[str]:
 
 
 def _detail(ctx: Any, model: str, key: str, v: Any, scope: frozenset[str] | None) -> str:
-    """A field argument value, with where it leads (method definition, related field)."""
     registry = ctx.registry
     if not isinstance(v, str) or key == "default":
         return f"`{_value(v)}`"
@@ -323,13 +291,10 @@ def _detail(ctx: Any, model: str, key: str, v: Any, scope: frozenset[str] | None
     return text
 
 
+# Merged like Odoo, base-most first: a list selection= resets, selection_add appends unseen keys.
 def _selection_line(ctx: Any, defs: list[MemberDef]) -> str | None:
-    """Selection values merged like Odoo does: the base selection plus every
-    ``selection_add`` of the overrides (base-most first). A selection given as a
-    module-level constant is resolved from the source; one that cannot be
-    (method name, expression) is shown as written, after the known values."""
     values: list[tuple[str, str | None]] = []
-    other: tuple[Any, MemberDef] | None = None  # last unresolved selection and its definition
+    other: tuple[Any, MemberDef] | None = None
     for d in reversed(defs):
         a = d.facts[F_ARGS] or {}
         sel = a.get("selection")
@@ -366,8 +331,6 @@ def _pairs(items: list) -> list[tuple[str, str | None]]:
 
 
 def _constant(ctx: Any, path: str, name: str, hops: int = 1) -> Any:
-    """Literal value of the module-level constant ``name`` used in ``path``:
-    assigned in that file or imported from another module (one hop)."""
     registry = ctx.registry
     facts = registry.file_facts(path) or {}
     for sym in facts.get(SYMBOLS) or ():
@@ -407,8 +370,6 @@ def _field_origin(model: str, defs: list[MemberDef], args: dict) -> list[str]:
 
 
 def _owner(d: MemberDef, model: str) -> str:
-    """``**module**``, plus the class's model when it is not ``model`` (mixin,
-    ``_inherits`` parent) or its name for framework classes."""
     if not d.cls.model:
         return f"**{_mod(d.module)}** ({d.cls.name})"
     if d.cls.model != model:
@@ -422,7 +383,6 @@ def _changed_args(d: MemberDef) -> str:
 
 
 def _override_lines(model: str, overrides: list[MemberDef], limit: int) -> list[str]:
-    """Overrides (base-most first) as a bullet list with their changed arguments."""
     if not overrides:
         return []
     out = ["Overridden in:"]
@@ -432,10 +392,6 @@ def _override_lines(model: str, overrides: list[MemberDef], limit: int) -> list[
     if len(overrides) > limit:
         out.append(f"- +{len(overrides) - limit} more")
     return out
-
-
-# ---------------------------------------------------------------------------
-# methods
 
 
 def method_card(ctx: Any, model: str | None, name: str, target: Target | None = None) -> str | None:
@@ -471,7 +427,6 @@ def method_card(ctx: Any, model: str | None, name: str, target: Target | None = 
     outside = _outside_overrides(registry, model, name, scope, K_METHODS, "method") if visible else []
     full = registry.method(model, name, None) if outside else []
     if len(full) > len(chain):
-        # what runs in a database where every module overriding it is installed
         out.append(f"**Call order with every module installed** ({len(full)}, load order reversed; each `super()` continues on the next line):")
         for i, d in enumerate(full[:MAX_FULL_CHAIN], 1):
             entry = _chain_entry(model, d, last=i == len(full))
@@ -501,10 +456,6 @@ def _chain_entry(model: str, d: MemberDef, last: bool) -> str:
     return s
 
 
-# ---------------------------------------------------------------------------
-# class attributes
-
-
 def attr_card(ctx: Any, model: str | None, name: str) -> str | None:
     registry, scope = ctx.registry, ctx.scope
     if not model:
@@ -522,10 +473,6 @@ def attr_card(ctx: Any, model: str | None, name: str) -> str | None:
     if len(defs) > MAX_OVERRIDES:
         out.append(f"- +{len(defs) - MAX_OVERRIDES} more")
     return "\n".join(out)
-
-
-# ---------------------------------------------------------------------------
-# models
 
 
 def model_card(ctx: Any, model: str) -> str | None:
@@ -574,8 +521,6 @@ def model_card(ctx: Any, model: str) -> str | None:
 
 
 def _views_line(registry: Any, model: str) -> str | None:
-    """Primary views of ``model`` (load order; form, list and search views first
-    within a module, guessed from the xml id) and the number of extension views."""
     views = registry.views_of_model(model)
     if not views:
         return None
@@ -592,8 +537,8 @@ def _view_kind_rank(xmlid: str) -> int:
 
 
 def _own_model_attr(registry: Any, model: str, attr: str, scope: frozenset[str] | None) -> Any:
-    """Effective value of a literal model attribute, ignoring framework defaults."""
     for c in registry.model_mro(model, scope):
+        # stop at framework classes: ignore their defaults
         if not c.model:
             break
         attrs = c.model_info.get(MI_ATTRS) or {}
@@ -616,7 +561,6 @@ def _model_facts(registry: Any, model: str, scope: frozenset[str] | None) -> lis
 
 
 def _access_lines(ctx: Any, model: str) -> list[str]:
-    """Summary of the access rights rows (CSV ACL / ir.access) and record rules on ``model``."""
     registry = ctx.registry
     local = "model_" + model.replace(".", "_")
     hits = []
@@ -631,7 +575,6 @@ def _access_lines(ctx: Any, model: str) -> list[str]:
         if (h.path, h.line) in seen:
             continue
         seen.add((h.path, h.line))
-        # rows of the file's dependency closure first; others flagged (installed only maybe)
         outside = scope is not None and h.module not in scope
         key = (outside, registry.module(h.module).rank if registry.module(h.module) else 0, h.path, h.line)
         mark = " *(not a dependency)*" if outside else ""
@@ -688,10 +631,6 @@ def _record_around(registry: Any, path: str, line: int) -> tuple | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# records, templates
-
-
 def xmlid_card(ctx: Any, xmlid: str) -> str | None:
     registry = ctx.registry
     recs = registry.records(xmlid)
@@ -713,7 +652,7 @@ def xmlid_card(ctx: Any, xmlid: str) -> str | None:
                 out.append(f"{key}: `{info[key]}`")
     elif info.get("res_model"):
         out.append(f"Model: **{info['res_model']}**")
-    elif info.get("model_id") and rec.tag != "csv":  # server action, cron, record rule
+    elif info.get("model_id") and rec.tag != "csv":
         model = _model_of_xmlid(registry, info["model_id"], rec.module)
         if model:
             out.append(f"Model: **{model}**")
@@ -736,7 +675,6 @@ def xmlid_card(ctx: Any, xmlid: str) -> str | None:
 
 
 def _model_of_xmlid(registry: Any, xid: str, module: str | None) -> str | None:
-    """'sale.model_sale_order' -> 'sale.order' (implicit ir.model xml ids)."""
     for r in registry.records(registry.qualify_xmlid(xid, module)):
         if r.tag == "implicit" and r.model == "ir.model":
             return r.info.get("model")
@@ -773,8 +711,6 @@ def _view_lines(ctx: Any, rec: RecordRef) -> list[str]:
 
 
 def _view_type(ctx: Any, rec: RecordRef, depth: int) -> str | None:
-    """View type: the ``type`` field (``qweb`` for templates), else the arch
-    root tag, or the parent's type for extension views."""
     info = rec.info
     vtype = info.get("view_type") or info.get("type")
     if vtype:
@@ -839,10 +775,6 @@ def template_card(ctx: Any, name: str) -> str | None:
     if calls:
         out.append(f"Used in {len(calls)} place(s) (t-call / JS template)")
     return "\n".join(out)
-
-
-# ---------------------------------------------------------------------------
-# modules, files, python symbols
 
 
 def module_card(ctx: Any, name: str) -> str | None:
@@ -910,7 +842,6 @@ def pysym_card(ctx: Any, target: Target) -> str | None:
     dotted = ctx.registry.py_dotted_name(path)
     where = f"{dotted + ' — ' if dotted else ''}{_at(path, target.line)}"
     if target.name and not re.match(rf"\s*(?:async\s+def|def|class)\s+{re.escape(target.name)}\b", lines[target.line]):
-        # a variable, parameter or imported name: show the line binding it (and its inferred type)
         head = f"`{target.name}`"
         models = target.extra.get("value_models")
         if models:
@@ -927,8 +858,6 @@ def pysym_card(ctx: Any, target: Target) -> str | None:
 
 
 def _js_symbol_card(ctx: Any, target: Target, lines: list[str]) -> str:
-    """Card of a JS symbol: its declaration header (or the line exporting it),
-    the first line of its JSDoc and its ``@module/path`` specifier."""
     path, line = target.path or "", target.line
     spec = _js_module(ctx.registry, path)
     where = f"{spec + ' — ' if spec else ''}{_at(path, line)}"
@@ -945,8 +874,6 @@ def _js_symbol_card(ctx: Any, target: Target, lines: list[str]) -> str:
 
 
 def _js_signature(lines: list[str], line: int, keyword: str) -> str:
-    """Declaration header at ``line``: a function up to its parameter list, a
-    class up to its body, other declarations as their first line."""
     first = lines[line].rstrip()
     if keyword == "class":
         return textwrap.dedent(first.split("{", 1)[0].rstrip())
@@ -966,13 +893,12 @@ def _js_signature(lines: list[str], line: int, keyword: str) -> str:
 
 
 def _jsdoc(lines: list[str], line: int) -> str | None:
-    """First text line of the ``/** ... */`` block right above ``line``."""
     if line == 0 or not lines[line - 1].strip().endswith("*/"):
         return None
     for start in range(line - 1, max(-1, line - 40), -1):
-        if "/*" in lines[start]:  # the comment's opening line
+        if "/*" in lines[start]:
             if "/**" not in lines[start]:
-                return None  # a plain block comment, not a JSDoc
+                return None
             for text in lines[start:line]:
                 text = text.strip().removeprefix("/**").removesuffix("*/").strip().lstrip("*").strip()
                 if text and not text.startswith("@"):
@@ -982,7 +908,6 @@ def _jsdoc(lines: list[str], line: int) -> str | None:
 
 
 def _js_module(registry: Any, path: str) -> str | None:
-    """``@module/path`` specifier of a file under ``static/src``."""
     module = registry.module_of_path(path)
     info = registry.module(module)
     if info is None:
@@ -994,7 +919,6 @@ def _js_module(registry: Any, path: str) -> str | None:
 
 
 def _signature(lines: list[str], line: int) -> str:
-    """The definition header starting at ``line`` (up to its colon, <= 4 lines)."""
     out = []
     for i in range(line, min(len(lines), line + 4)):
         text = lines[i].rstrip()
@@ -1012,7 +936,7 @@ def _pysym_doc(ctx: Any, path: str, line: int, lines: list[str]) -> str | None:
         for m in cls[K_METHODS]:
             if m[M_LINE] == line:
                 return m[M_DOC]
-    # module-level function: first line of a docstring right after the header
+    # facts hold no doc for module-level functions: read the docstring after the header
     for i in range(line + 1, min(len(lines), line + 12)):
         text = lines[i].strip()
         if not text:
@@ -1024,10 +948,6 @@ def _pysym_doc(ctx: Any, path: str, line: int, lines: list[str]) -> str | None:
             continue
         break
     return None
-
-
-# ---------------------------------------------------------------------------
-# ambiguous targets
 
 
 def _ambiguous_card(ctx: Any, target: Target) -> str | None:
@@ -1061,7 +981,6 @@ def _candidate_line(ctx: Any, kind: str, model: str, name: str) -> str | None:
 
 
 def _one_liner(ctx: Any, target: Target) -> str | None:
-    """Short description of an alternative target."""
     kind = target.kind
     if kind in (FIELD, METHOD, ATTR):
         if target.model:

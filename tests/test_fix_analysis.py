@@ -1,11 +1,3 @@
-"""Regression tests of the analysis fixes: framework tables shared with the
-extractor (CachedModel), field-declaration calls recognised like the facts
-extractor, no name-based model pinned for BaseModel members in XML, and the
-x2many sub-view tags shared with the XML extractor.
-
-Run: ODOO_LENS_CACHE_DIR=... python3.12 -m unittest tests.test_fix_analysis -v
-"""
-
 from __future__ import annotations
 
 import ast
@@ -79,7 +71,6 @@ EXTRA_FILES = {
 
 
 def find(path: str, needle: str, offset: int = 0) -> tuple[int, int]:
-    """1-based (line, column) of the first occurrence of ``needle`` (+ offset)."""
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh.read().split("\n")):
             j = line.find(needle)
@@ -150,7 +141,6 @@ class FieldCallTest(unittest.TestCase):
         self.assertEqual(got, self.EXPECTED)
 
     def test_facts_module_scope(self):
-        # partial parses: the module scope is built from the IMPORTS facts
         f = pa._File("/tmp/x/models/probe.py", self.SRC)
         f.facts_module_scope(pyfacts.extract("/tmp/x/models/probe.py", self.SRC))
         got = {k: pa._field_class(call, f.module_scope) for k, call in self.calls(f).items()}
@@ -176,7 +166,7 @@ class MiniTreeTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(textwrap.dedent(content).lstrip("\n"))
         old = os.environ.get("ODOO_LENS_NO_CACHE")
-        os.environ["ODOO_LENS_NO_CACHE"] = "1"  # temporary root: keep it out of the shared cache
+        os.environ["ODOO_LENS_NO_CACHE"] = "1"
         try:
             cls.server = headless_server()
             cls.env, _ = load_env(cls.server, os.path.join(cls.root, "custom/my_fix/__manifest__.py"))
@@ -202,8 +192,6 @@ class MiniTreeTest(unittest.TestCase):
     def at(self, rel: str, needle: str, offset: int = 0) -> list:
         return targets_at(self.ctx(rel, needle, offset))
 
-    # -- field declarations by bare imported class name ------------------------
-
     PROBE = "custom/my_fix/models/probe.py"
 
     def test_lambda_domain_of_bare_field_class(self):
@@ -211,12 +199,9 @@ class MiniTreeTest(unittest.TestCase):
             res = self.at(self.PROBE, needle, 3)
             self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "res.partner", "name")], needle)
 
-    # -- XML: unknown view model ----------------------------------------------
-
     VIEWS = "custom/my_fix/views/views.xml"
 
     def test_base_member_not_pinned(self):
-        # create is a BaseModel method (overridden by sale.order): no basis to pick a model
         self.assertEqual(self.at(self.VIEWS, 'name="create"', 7), [])
 
     def test_magic_field_not_pinned(self):

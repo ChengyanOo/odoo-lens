@@ -1,24 +1,3 @@
-"""Call hierarchy of Odoo model methods.
-
-* ``prepare``: one item - Claude Code only uses the first - for the method under
-  the cursor resolved to the definition that runs (``super()``: the one it
-  reaches), else for the function enclosing the cursor; an item built on an
-  uninferred receiver says so in its detail (with the candidate models).
-  ``data`` carries ``{"model", "name"}`` for the follow-up requests.
-* ``incoming``: Python call sites (``x.m(...)`` / ``super().m(...)``) whose
-  receiver is compatible with the item's model (inheritance either way; unknown
-  receivers only as ``navigation.trust_unknown_receiver`` allows, like
-  findReferences), grouped by enclosing function; then XML buttons,
-  ``<function>`` calls, server action / cron ``code``, JS ``orm.call`` and
-  field arguments naming the method (``compute=``, ``inverse=``,
-  ``compute_sql=``...). Only files of modules that can see the model are
-  scanned (its defining modules and their dependents), customer code first,
-  tests and never-loaded scripts (migrations...) last, within a time box.
-* ``outgoing``: the calls made by the item's function, each resolved to the
-  method definition it runs (``super()`` -> the next definition below in the
-  MRO); unresolved calls are left out.
-"""
-
 from __future__ import annotations
 
 import os
@@ -67,18 +46,13 @@ KIND_VARIABLE = 13
 KIND_OBJECT = 19
 
 MAX_CALLS = 100
-TIME_BOX = 3.0  # seconds spent scanning Python files for incoming calls
+TIME_BOX = 3.0  # seconds
 MAX_RECEIVERS = 3
 SUPER_RE = re.compile(r"super\s*\([^()]*\)\s*\.\s*$")
-# method references of these roles are calls made by the framework
 CALLER_ROLES = frozenset({"compute", "inverse", "search", "default", "selection", "group_expand", "compute_sql", "button", "function", "js", "code"})
 # roles whose ctx holds a record index: the owner model is resolved from the record
 RECORD_ROLES = frozenset({"button", "code"})
 CODE_DETAILS = {"ir.cron": "cron code", "ir.actions.server": "server action code"}
-
-
-# ---------------------------------------------------------------------------
-# prepare
 
 
 def prepare(ctx: Any) -> list[dict]:
@@ -93,7 +67,7 @@ def prepare(ctx: Any) -> list[dict]:
         if d is not None:
             item = method_item(ctx, model, d)
             if target.model is None or target.extra.get("guess"):
-                # Claude reads one item: keep the best candidate, but say it is one
+                # Claude Code uses only the first item: keep the best candidate, flag the guess
                 note = f"receiver not inferred (candidates: {', '.join(models)})"
                 item["detail"] = f"{item['detail']} · {note}" if item["detail"] else note
             return [item]
@@ -104,7 +78,6 @@ def prepare(ctx: Any) -> list[dict]:
 
 
 def _target_definition(ctx: Any, target: Target, model: str) -> MemberDef | None:
-    """The definition under the cursor, else the one the call runs first."""
     name = target.name or ""
     if target.extra.get("super"):
         line = target.origin[0] if target.origin else ctx.line
@@ -118,13 +91,7 @@ def _target_definition(ctx: Any, target: Target, model: str) -> MemberDef | None
     return defs[0] if defs else None
 
 
-# ---------------------------------------------------------------------------
-# items
-
-
 def _item(ctx: Any, name: str, kind: int, path: str, line: int, col: int, end_col: int, end_line: int, detail: str, data: dict) -> dict:
-    """CallHierarchyItem whose range spans the definition from its first line
-    (not decorators) to its last line."""
     lines = ctx.server.documents.lines(path) or []
     text = lines[line] if 0 <= line < len(lines) else ""
     start = min(len(text) - len(text.lstrip()), col)
@@ -148,7 +115,6 @@ def method_item(ctx: Any, model: str, d: MemberDef) -> dict:
 
 
 def function_item(ctx: Any, path: str, enc: dict) -> dict:
-    """Item of a function as reported by ``analysis.python.enclosing_function``."""
     model, cls, name = enc.get("model"), enc.get("class"), enc["name"]
     label = f"{model}.{name}" if model else f"{cls}.{name}" if cls else name
     kind = KIND_METHOD if model or cls else KIND_FUNCTION
@@ -163,16 +129,10 @@ def _file_item(ctx: Any, path: str, line: int, col: int, end_col: int, name: str
 
 
 def _group(entries: dict, key: tuple, side: str, make_item: Callable[[], dict], line: int, col: int, end_col: int) -> None:
-    """Add a call site to the incoming (``side="from"``) / outgoing (``"to"``)
-    call grouped under ``key``; the item is built for the first site only."""
     entry = entries.get(key)
     if entry is None:
         entry = entries[key] = {side: make_item(), "fromRanges": []}
     entry["fromRanges"].append(lsp_range(line, col, line, end_col))
-
-
-# ---------------------------------------------------------------------------
-# incoming
 
 
 def incoming(ctx: Any, item: dict) -> list[dict]:
@@ -189,7 +149,6 @@ def incoming(ctx: Any, item: dict) -> list[dict]:
 
 
 def _receiver_filter(registry: Any, model: str, name: str) -> Callable[[Any], bool]:
-    """Whether a call on receivers of the given models may reach ``model.name``."""
     few = trust_unknown_receiver(registry, name)
 
     def accepts(receivers: Any) -> bool:
@@ -201,8 +160,6 @@ def _receiver_filter(registry: Any, model: str, name: str) -> Callable[[Any], bo
 
 
 def _candidate_files(ctx: Any, model: str) -> list[str]:
-    """Python files of the modules that can see ``model``: customer code first,
-    then by load order; tests / migrations last."""
     registry = ctx.registry
     classes = registry.model_classes(model)
     owners = {c.module for c in classes if c.is_definition and c.module} or {c.module for c in classes if c.module}
@@ -248,10 +205,7 @@ def _python_callers(ctx: Any, model: str, name: str, accepts: Callable, deadline
 
 
 def _super_reaches(ctx: Any, receivers: Any, path: str, line: int) -> bool:
-    """Whether ``super().m()`` at ``path:line`` can reach the item's definition
-    (``ctx`` is positioned on it): only definitions below the calling class in
-    the MRO are reachable - an override's own ``super()`` call never reaches
-    itself nor the overrides above it."""
+    # ctx is on the item's definition; super() reaches only definitions below the caller in the MRO
     for model in receivers or ():
         mro = ctx.registry.model_mro(model)
         caller = class_containing(mro, path, line)
@@ -262,9 +216,6 @@ def _super_reaches(ctx: Any, receivers: Any, path: str, line: int) -> bool:
 
 
 def _ref_callers(ctx: Any, model: str, name: str, accepts: Callable) -> list[dict]:
-    """XML buttons, ``<function>`` calls, server action / cron ``code``, JS
-    ``orm.call``s and field arguments (``compute=``, ``inverse=``...) naming
-    the method."""
     registry = ctx.registry
     entries: dict[tuple, dict] = {}
     for hit in registry.refs_by_name(REF_METHOD, name):
@@ -287,7 +238,6 @@ def _ref_callers(ctx: Any, model: str, name: str, accepts: Callable) -> list[dic
 
 
 def _ref_caller(ctx: Any, hit: RefHit, owner: str | None) -> tuple[tuple, Callable[[], dict]]:
-    """(grouping key, item factory) of the element holding a method reference."""
     registry = ctx.registry
     path, role = hit.path, hit.ctx[0]
     facts = registry.file_facts(path) or {}
@@ -321,10 +271,6 @@ def _js_symbol_before(facts: dict, line: int) -> tuple | None:
         if sym[S_LINE] <= line and (best is None or sym[S_LINE] >= best[S_LINE]):
             best = sym
     return best
-
-
-# ---------------------------------------------------------------------------
-# outgoing
 
 
 def outgoing(ctx: Any, item: dict) -> list[dict]:

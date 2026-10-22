@@ -1,9 +1,3 @@
-"""CSV data files (``ir.model.access.csv``, Odoo 20 ``ir.access.csv``, any
-``<model>.csv`` data file): one record per row with an ``id`` column, xml id
-references from ``<field>:id`` / ``<field>/id`` columns, model names from
-``model_id`` columns holding technical names (Odoo 20), field paths of
-``domain`` columns, and header cells as field references of the file's model."""
-
 from __future__ import annotations
 
 import os
@@ -27,10 +21,8 @@ MODEL_RE = re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_]+)+$")
 DOMAIN_FIELD_RE = re.compile(r"""[(\[]\s*(['"])([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\1\s*,""")
 
 
+# RFC 4180 row at i (cells may span lines) -> ([(value, byte_start, byte_end)], next row offset)
 def _quoted_row(src: bytes, i: int) -> tuple[list[tuple[str, int, int]], int]:
-    """One CSV row starting at ``i`` with RFC 4180 quoting (cells may span lines).
-    Returns the cells as (value, byte_start, byte_end) of the content, and the
-    offset of the next row."""
     n = len(src)
     row: list[tuple[str, int, int]] = []
     while True:
@@ -49,7 +41,7 @@ def _quoted_row(src: bytes, i: int) -> tuple[list[tuple[str, int, int]], int]:
                 j += 1
             row.append((bytes(buf).decode("utf-8", "replace"), i + 1, j))
             i = j + 1
-            while i < n and src[i : i + 1] not in (b",", b"\n"):  # junk after the closing quote
+            while i < n and src[i : i + 1] not in (b",", b"\n"):
                 i += 1
         else:
             j = i
@@ -64,11 +56,8 @@ def _quoted_row(src: bytes, i: int) -> tuple[list[tuple[str, int, int]], int]:
         return row, (i + 1 if i < n else n)
 
 
+# Fast path: quote-free lines (nearly all) use C-speed bytes.split; quoted rows use _quoted_row.
 def _cells(src: bytes):
-    """Yield rows as lists of (value, byte_start, byte_end) of each cell content.
-
-    Lines without any double quote (nearly all of them) are split with C-speed
-    bytes.split; rows with quotes go through the RFC 4180 state machine."""
     n = len(src)
     i = 0
     while i < n:
@@ -110,7 +99,6 @@ def extract(path: str, src: bytes, index: bool = False) -> dict:
     cols = [h[0].strip() for h in header]
     refs = facts[REFS]
     records = facts[RECORDS]
-    # header cells: field names of the file's model
     for (value, b0, b1), name in zip(header, cols):
         fname = re.split(r"[:/]", name, 1)[0]
         if fname and fname not in ("id",) and re.match(r"^[a-z_][a-z0-9_]*$", fname):
@@ -118,6 +106,7 @@ def extract(path: str, src: bytes, index: bool = False) -> dict:
             refs.append((REF_FIELD, fname, line, c0, c1, ("csv_header", model)))
     id_idx = cols.index("id") if "id" in cols else -1
     xid_cols = {i: c for i, c in enumerate(cols) if c.endswith((":id", "/id")) and c not in (":id", "/id")}
+    # cells that may hold technical model names (e.g. saas-19.4+ ir.access.csv model_id)
     model_name_cols = {i for i, c in enumerate(cols) if c in ("model_id", "model", "res_model")}
     domain_cols = {i for i, c in enumerate(cols) if c in ("domain", "domain_force")}
     name_idx = cols.index("name") if "name" in cols else -1
@@ -125,7 +114,7 @@ def extract(path: str, src: bytes, index: bool = False) -> dict:
     for row in rows:
         if not row or all(not v.strip() for v, _, _ in row):
             continue
-        if big:  # huge data file (cities, counties...): ids only
+        if big:
             if 0 <= id_idx < len(row) and row[id_idx][0].strip():
                 value, b0, b1 = row[id_idx]
                 line, c0, c1 = s.span(b0, b1)

@@ -1,16 +1,3 @@
-"""Persistent facts cache.
-
-One *shard* per indexed root directory (an addons root or the ``odoo`` framework
-package), so envs sharing sources (e.g. a custom-modules env built on top of the
-19.0 checkout and the 19.0 checkout itself) share their biggest shards.
-
-A shard maps ``relative path -> (mtime_ns, size, facts)`` and is stored with
-:mod:`marshal` (fast; Python-version specific, hence part of the file name).
-Writes are atomic (temp file + rename) so concurrent servers never read torn
-files; the last writer wins, which is fine because entries are validated
-against ``(mtime_ns, size)`` on load.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +12,7 @@ from .facts import FACTS_VERSION
 
 log = logging.getLogger("odoo_lens.cache")
 
-MAX_SHARDS = 64  # oldest-used shards beyond this are pruned
+MAX_SHARDS = 64
 
 
 def cache_dir() -> str:
@@ -36,6 +23,7 @@ def cache_dir() -> str:
     return os.path.join(base, "odoo-lens")
 
 
+# One shard per root (shared across envs); marshal is Python-version specific, hence in the name.
 def shard_path(root: str) -> str:
     ident = f"{FACTS_VERSION}|{sys.version_info[0]}.{sys.version_info[1]}|{os.path.realpath(root)}"
     digest = hashlib.sha1(ident.encode("utf-8", "surrogateescape")).hexdigest()[:20]
@@ -44,7 +32,7 @@ def shard_path(root: str) -> str:
     return os.path.join(cache_dir(), f"{safe}-{digest}.marshal")
 
 
-Shard = dict  # relpath -> (mtime_ns, size, facts)
+Shard = dict  # relpath -> (mtime_ns, size, facts); indexer reuses facts only while both match
 
 
 def load_shard(root: str) -> Shard:
@@ -56,13 +44,13 @@ def load_shard(root: str) -> Shard:
             data = marshal.loads(fh.read())
     except FileNotFoundError:
         return {}
-    except Exception as exc:  # corrupt / incompatible -> rebuild
+    except Exception as exc:
         log.warning("discarding unreadable cache %s: %s", path, exc)
         return {}
     if not isinstance(data, dict) or data.get("v") != FACTS_VERSION or data.get("root") != root:
         return {}
     try:
-        os.utime(path)  # mark as recently used for pruning
+        os.utime(path)  # mtime = last use, for prune()
     except OSError:
         pass
     return data.get("files") or {}
@@ -76,6 +64,7 @@ def save_shard(root: str, files: Shard) -> None:
     try:
         os.makedirs(directory, exist_ok=True)
         blob = marshal.dumps({"v": FACTS_VERSION, "root": root, "files": files})
+        # temp file + rename: concurrent servers never read a torn shard (last writer wins)
         fd, tmp = tempfile.mkstemp(prefix=".shard-", dir=directory)
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -107,7 +96,6 @@ def prune(max_shards: int = MAX_SHARDS) -> None:
             os.unlink(e.path)
         except OSError:
             pass
-    # stale temp files from crashed writers
     now = time.time()
     try:
         for e in os.scandir(directory):

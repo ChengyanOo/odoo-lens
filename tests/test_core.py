@@ -1,5 +1,3 @@
-"""Unit tests for the core: transport, documents, envs, extractors, cache/indexer, registry."""
-
 from __future__ import annotations
 
 import io
@@ -57,8 +55,8 @@ class TransportTest(unittest.TestCase):
         t = Transport(io.BytesIO(bad), io.BytesIO())
         with self.assertRaises(ValueError):
             t.read()
-        self.assertEqual(t.read()["id"], 1)  # stream still usable after a bad body
-        self.assertIsNone(t.read())  # EOF
+        self.assertEqual(t.read()["id"], 1)
+        self.assertIsNone(t.read())
 
 
 class DocumentsTest(unittest.TestCase):
@@ -140,7 +138,6 @@ class ExtractTest(unittest.TestCase):
         self.assertIn(("field", "order_line.price_subtotal", "depends"), refs)
         self.assertIn(("method", "_compute_amounts", "compute"), refs)
         self.assertIn(("model", "ir.sequence", "env"), refs)
-        # positions are exact (content of the string literal)
         lines = read(path).decode().split("\n")
         for r in f[REFS]:
             self.assertEqual(lines[r[2]][r[3] : r[4]], r[1].split(",")[0] if r[0] != "field" or "." not in r[1] else r[1])
@@ -215,7 +212,7 @@ class IndexAndRegistryTest(unittest.TestCase):
         ranks = {m.name: m.rank for m in r.modules()}
         self.assertEqual(ranks["base"], 0)
         self.assertLess(ranks["sale"], ranks["sale_stock"])
-        self.assertLess(ranks["my_module"], ranks["sale_stock"])  # same depth: by name
+        self.assertLess(ranks["my_module"], ranks["sale_stock"])
         scope = r.scope_for_path(self.p("custom/my_module/models/sale_order.py"))
         self.assertIn("sale", scope)
         self.assertNotIn("sale_stock", scope)
@@ -228,20 +225,20 @@ class IndexAndRegistryTest(unittest.TestCase):
         self.assertLess(models.index("sale.order"), models.index("mail.thread"))
         self.assertLess(models.index("mail.thread"), models.index("base"))
         defs = r.method("sale.order", "action_confirm")
-        self.assertEqual(defs[-1].module, "sale")  # base-most last (most-derived first)
+        self.assertEqual(defs[-1].module, "sale")
         self.assertEqual({d.module for d in defs}, {"sale", "sale_stock", "sale_subscription", "my_module"})
         info = r.field_info("sale.order", "partner_id")
         self.assertEqual(info["comodel"], "res.partner")
-        self.assertTrue(info["args"]["tracking"])  # merged from sale_stock's override
-        self.assertTrue(r.field("sale.order", "create_date"))  # magic
-        self.assertTrue(r.field("res.users", "email"))  # _inherits delegation
+        self.assertTrue(info["args"]["tracking"])
+        self.assertTrue(r.field("sale.order", "create_date"))
+        self.assertTrue(r.field("res.users", "email"))
         self.assertEqual(r.field("res.users", "email")[0].delegated_via, "partner_id")
         self.assertEqual([s for s, _, d in r.walk_path("sale.order", "partner_id.country_id.code") if d], ["partner_id", "country_id", "code"])
 
     def test_xmlids_and_views(self):
         r = self.reg
         self.assertEqual(r.records("base.main_company")[0].model, "res.company")
-        self.assertTrue(r.records("sale_stock.model_sale_order"))  # implicit: module extends the model
+        self.assertTrue(r.records("sale_stock.model_sale_order"))  # implicit: one per module extending the model
         self.assertFalse(r.records("mail.model_sale_order"))
         self.assertTrue(r.records("sale.field_sale_order__partner_id"))
         views = {v.xmlid for v in r.views_of_model("sale.order")}

@@ -1,18 +1,4 @@
-"""Precision sweep: run diagnostics over every file of an Odoo checkout.
-
-    python3.12 scripts/sweep_diagnostics.py <checkout_dir> [--modules a,b] [--limit N]
-                                            [--samples N] [--codes c1,c2] [--out FILE]
-
-``checkout_dir`` is a community root or an odev-style container
-(``<dir>/{odoo,enterprise,design-themes}``). The env is loaded once (headless
-server, warm cache); every ``.py`` / ``.xml`` / ``.csv`` / ``__manifest__.py`` of
-the env's modules under ``checkout_dir`` is checked like the server would. Prints
-counts per code and severity, the noisiest modules, samples per code and the
-slowest files. ``--out`` writes every diagnostic as JSON lines.
-
-Odoo's own sources must produce (almost) no diagnostics: every diagnostic
-reported here is either a real problem in Odoo or a false positive to fix.
-"""
+"""Precision sweep: run diagnostics over every file of an Odoo checkout."""
 
 from __future__ import annotations
 
@@ -79,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         if ctx.kind not in KINDS:
             continue
         if ctx.kind in ("py", "manifest"):
-            ctx._facts = facts  # index facts of Python files are complete: skip re-extraction
+            # py/manifest index facts are complete (index=True only trims XML/CSV): skip re-extraction
+            ctx._facts = facts
         t = time.perf_counter()
         diags = diagnostics(ctx)
         timings.append((time.perf_counter() - t, path))

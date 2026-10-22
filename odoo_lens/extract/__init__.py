@@ -1,8 +1,4 @@
-"""Facts extractors: pure ``extract(path, source: bytes) -> dict`` functions.
-
-They only depend on the standard library and :mod:`odoo_lens.facts`, never raise,
-and run inside worker processes during parallel indexing.
-"""
+# Also run in spawned pool workers: import only the stdlib, ..facts and sibling extractors.
 
 from __future__ import annotations
 
@@ -10,7 +6,6 @@ from ..facts import ERROR, KIND, KIND_CSV, KIND_JS, KIND_MANIFEST, KIND_PY, KIND
 
 
 def kind_for_path(name: str, rel: str) -> str | None:
-    """Facts kind for a file ``name`` at module-relative path ``rel`` (None = skip)."""
     if name.endswith(".py"):
         return KIND_MANIFEST if name == "__manifest__.py" else KIND_PY
     if name.endswith(".xml"):
@@ -24,10 +19,8 @@ def kind_for_path(name: str, rel: str) -> str | None:
 
 
 def extract_source(path: str, kind: str, src: bytes, index: bool = False) -> dict:
-    """Facts of one file. ``index=True`` (background indexing) leaves out
-    high-volume facts that are only needed for the file being edited (XML
-    record-level ``<field name>`` refs, refs of big data CSVs); queries that need
-    them re-extract the few candidate files."""
+    # index=True (background indexing) drops bulky facts: XML record-level <field name> refs,
+    # big data-CSV row refs, l10n /data/template/ CSVs; open/candidate files get a full re-extract.
     try:
         if kind == KIND_PY:
             from .pyfacts import extract
@@ -46,5 +39,5 @@ def extract_source(path: str, kind: str, src: bytes, index: bool = False) -> dic
         else:
             return {KIND: kind, ERROR: ("unsupported file kind", 0, 0)}
         return extract(path, src)
-    except Exception as exc:  # extractors must never take the indexer down
+    except Exception as exc:  # never take the indexer down
         return {KIND: kind, ERROR: (f"internal extractor error: {type(exc).__name__}: {exc}", 0, 0)}

@@ -1,7 +1,3 @@
-"""JS facts (static/src/**/*.js): module imports, top-level symbols, and the
-Odoo-specific strings worth navigating from: owl ``template`` names, models and
-methods called through the ORM service (``orm.call("res.partner", "x")``)."""
-
 from __future__ import annotations
 
 import re

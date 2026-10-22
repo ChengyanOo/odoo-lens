@@ -1,31 +1,3 @@
-"""Diagnostics of one file (``textDocument/publishDiagnostics``, ``odoo-lens check``).
-
-Precision first: Odoo's own sources must produce (almost) no diagnostics, so a
-problem is only reported when the env is complete enough to be sure:
-
-* a model / field / method / xml id is "unknown" only when whatever would
-  provide it is part of the env (``base`` present, the xml id's module present,
-  the model's MRO fully visible: no Python mixin bases, no parent model outside
-  the scope);
-* when the current module depends on modules missing from the env, anything
-  they could provide is uncertain: the severity is lowered one level and the
-  message names the missing dependencies;
-* a reference resolving only through modules outside ``closure(module)`` is a
-  ``missing-dependency`` warning naming the module to add to ``depends``.
-
-Claude Code shows only the file basename and at most 10 diagnostics per file,
-so every message is one self-explanatory line naming the model / module.
-
-Codes: ``syntax-error``, ``unknown-model``, ``unknown-field``,
-``unknown-method``, ``private-method`` (a ``_``-prefixed button method),
-``unknown-xmlid``, ``missing-dependency``, ``unknown-module``,
-``missing-file``, ``invalid-default``, ``deprecated``, ``deprecated-attrs``,
-``deprecated-tree``, ``unknown-view-type`` (``<list>`` before Odoo 18.0),
-``not-imported`` (a Python file defining models that no import reaches),
-``not-loaded`` (a data file whose manifest entry is commented out). Data files
-the manifest does not load are not checked otherwise: Odoo never reads them.
-"""
-
 from __future__ import annotations
 
 import difflib
@@ -106,9 +78,10 @@ from ..registry import LOG_ACCESS_FIELDS, UNLOADED_DIRS, model_class_info
 
 SOURCE = "odoo-lens"
 ERROR_, WARNING, INFO, HINT = 1, 2, 3, 4
+# Claude Code shows <=10 per file, basename only: every message is a self-explanatory one-liner
 MAX_DIAGNOSTICS = 50
 
-# bases closing a model class; any other base is a Python mixin the registry cannot see
+# other bases are Python mixins the registry cannot see (model not closed)
 MODEL_BASES = frozenset({"Model", "AbstractModel", "TransientModel", "BaseModel", "CachedModel", "object"})
 NON_RELATIONAL = frozenset(
     {"Char", "Text", "Html", "Integer", "Float", "Monetary", "Boolean", "Date", "Datetime", "Selection", "Binary", "Image", "Json", "Id"}
@@ -116,8 +89,9 @@ NON_RELATIONAL = frozenset(
 VIEW_TYPES = frozenset(
     {"form", "list", "tree", "kanban", "search", "graph", "pivot", "calendar", "gantt", "activity", "cohort", "map", "grid", "hierarchy", "card"}
 )
-SUBVIEW_TAGS = frozenset({"form", "list", "tree", "graph", "kanban", "calendar"})  # ir_ui_view._validate_tag_field
-# fields every model has (16-18 synthesized by MetaModel, 19+ partly declared on BaseModel)
+# Odoo's ir_ui_view._validate_tag_field list: narrower than xmlfacts.SUBVIEW_TAGS on purpose
+SUBVIEW_TAGS = frozenset({"form", "list", "tree", "graph", "kanban", "calendar"})
+# on every model: 16-18 synthesized by MetaModel (not in facts), 19+ partly declared on BaseModel
 MAGIC_FIELDS = {
     "id": ("Id", None),
     "display_name": ("Char", None),
@@ -128,9 +102,7 @@ MAGIC_FIELDS = {
     "__last_update": ("Datetime", None),
 }
 
-# Python string arguments naming fields: role -> (severity, label). Odoo raises at
-# registry setup for related/depends/currency_field/inverse_name/_rec_name, at
-# search time for _order/_rec_names_search, and only logs for constrains/onchange.
+# severity mirrors Odoo: raises at setup or search (_order), only logs for constrains/onchange
 PY_FIELD_ROLES = {
     "related": (ERROR_, "related"),
     "depends": (ERROR_, "@api.depends"),
@@ -144,11 +116,10 @@ PY_FIELD_ROLES = {
     "domain": (WARNING, "domain"),
 }
 PY_METHOD_ROLES = frozenset({"compute", "inverse", "search", "group_expand", "compute_sql", "selection", "default"})
-# resolved on concrete models only: an abstract mixin may name members that its
-# inheritors define (registry._field_triggers skips abstract models)
+# an abstract mixin may name members only its inheritors define: accepted if one of them resolves it
 LATE_BOUND_ROLES = frozenset({"depends", "constrains", "onchange", "_order", "_rec_names_search"}) | PY_METHOD_ROLES
 SIMPLE_NAME_ROLES = frozenset({"constrains", "onchange", "currency_field", "inverse_name", "_rec_name"})
-# xml id references the loader resolves at install (missing target = failed install)
+# resolved by the loader at install: a missing target fails the install
 XML_STRICT_ROLES = frozenset({"ref", "inherit_id", "parent", "action"})
 XML_ROLE_LABELS = {
     "ref": "ref",
@@ -170,12 +141,11 @@ REMOVED_DECORATORS = {
     "api.model_create_single": ((19, 0), "@api.model_create_single was removed in Odoo 19.0: use @api.model_create_multi"),
 }
 FIELD_KWARG_DEPRECATIONS = (
-    # kwarg, since, message
     ("states", (17, 0), "Field parameter 'states' is ignored since Odoo 17.0: use readonly/required/invisible expressions in the views"),
     ("group_operator", (18, 0), "Field parameter 'group_operator' was renamed 'aggregator' in Odoo 18.0"),
     ("auto_join", (19, 0), "Field parameter 'auto_join' was renamed 'bypass_search_access' in Odoo 19.0 (auto_join is ignored)"),
 )
-SOFT_LOOKUPS = frozenset({"_xmlid_to_res_id", "_xmlid_to_res_model_res_id"})  # return False when missing
+SOFT_LOOKUPS = frozenset({"_xmlid_to_res_id", "_xmlid_to_res_model_res_id"})
 
 _XMLID_KEY_RE = re.compile(r"""['"]xml_id['"]\s*:\s*['"]([\w.\-]+)['"]""")
 _TAG_RE = re.compile(rb"""<[^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>""")
@@ -192,7 +162,6 @@ _XMLID_SQL_RE = re.compile(rb"""\bir_model_data\b|_update_xmlids\(""")
 _CALL_BEFORE_RE = re.compile(r"""([\w\])]*)\s*\.\s*(\w+)\(\s*$""")
 _NOT_FOUND_FALSE_RE = re.compile(r"""raise_if_not_found\s*=\s*False|^\s*['"]?\s*,\s*False\b""")
 _USER_HAS_GROUPS_RE = re.compile(rb"""\.user_has_groups\(""")
-# tests for optional modules: a model/field/module that may not be installed
 _OPTIONAL_GUARD_RE = re.compile(
     r"""['"][\w.]+['"]\s+(?:not\s+)?in\s+[\w.\[\]'"()]*(?:env|_fields|registry|pool)\b"""
     r"""|ir\.module\.module|base\.module_\w|_is_installed|module_installed|install_modules\(|button_immediate_install"""
@@ -201,8 +170,6 @@ _OPTIONAL_GUARD_RE = re.compile(
 
 
 def diagnostics(ctx: Any) -> list[dict]:
-    """LSP diagnostics of ``ctx.path``: deduplicated, sorted by severity then
-    position, at most :data:`MAX_DIAGNOSTICS`."""
     kind = ctx.kind
     if kind not in ("py", "xml", "csv", "manifest"):
         return []
@@ -220,7 +187,7 @@ def diagnostics(ctx: Any) -> list[dict]:
                 return report.result()  # its models never exist: other checks would mislead
             _PythonChecker(ctx, res, facts, report).run()
         elif kind in ("xml", "csv") and not _loaded_file(ctx):
-            _not_loaded(ctx, report)  # Odoo never reads it: its content cannot break anything
+            _not_loaded(ctx, report)
         elif kind == "xml":
             _XmlChecker(ctx, res, facts, report).run()
         elif kind == "csv":
@@ -231,8 +198,6 @@ def diagnostics(ctx: Any) -> list[dict]:
 
 
 def _not_imported(ctx: Any, facts: dict, report: "_Report") -> bool:
-    """not-imported: a module's Python file defining models that no import chain
-    from the module's ``__init__.py`` reaches (Odoo never loads it)."""
     reg = ctx.registry
     if not hasattr(reg, "is_loaded") or reg.is_loaded(ctx.path):
         return False
@@ -260,8 +225,6 @@ def _not_imported(ctx: Any, facts: dict, report: "_Report") -> bool:
 
 
 def _not_loaded(ctx: Any, report: "_Report") -> None:
-    """not-loaded: a data file whose manifest entry is commented out (files merely
-    absent from the manifest - fixtures, samples - are left alone)."""
     info = ctx.registry.module(ctx.module)
     rel = _module_rel(ctx.registry, ctx.module, ctx.path)
     if info is None or not rel:
@@ -269,7 +232,8 @@ def _not_loaded(ctx: Any, report: "_Report") -> None:
     lines = _file_lines(ctx, info.manifest) or []
     quoted = re.compile(r"['\"](?:\./)?" + re.escape(rel) + r"['\"]")
     if any(quoted.search(text.split("#", 1)[0]) for text in lines):
-        return  # still referenced, e.g. in 'other_files' (kept on purpose, never loaded)
+        return
+    # only commented-out entries: unlisted files (fixtures, samples) are left alone
     rx = re.compile(r"#.*" + quoted.pattern)
     for i, text in enumerate(lines):
         if rx.search(text):
@@ -293,7 +257,6 @@ _COMMENTED_IMPORT = re.compile(r"^\s*#+\s*from\s+\.\s+import\s+(.+)$")
 
 
 def _commented_import(ctx: Any, init: str, name: str) -> int | None:
-    """0-based line of a commented-out ``# from . import <name>`` in ``init``."""
     for i, text in enumerate(_file_lines(ctx, init) or ()):
         m = _COMMENTED_IMPORT.match(text)
         if m and name in [n.strip().split(" as ")[0].strip() for n in m.group(1).split(",")]:
@@ -302,9 +265,6 @@ def _commented_import(ctx: Any, init: str, name: str) -> int | None:
 
 
 def _loaded_file(ctx: Any) -> bool:
-    """Whether Odoo loads the file: Python and manifests always, XML/CSV when
-    listed in the manifest or part of the assets (static/src); other XML (test
-    fixtures, sample responses...) may be invalid on purpose."""
     if ctx.kind in ("py", "manifest"):
         return True
     rel = _module_rel(ctx.registry, ctx.module, ctx.path)
@@ -317,20 +277,13 @@ def _module_rel(reg: Any, module: str | None, path: str) -> str | None:
 
 
 def _manifest_files(reg: Any, module: str) -> set[str]:
-    """Module-relative paths of the manifest's data and demo files."""
     info = reg.module(module)
     manifest = reg.file_facts(info.manifest) if info is not None else None
     entries = [e for key in (MANIFEST_DATA, MANIFEST_DEMO) for e in (manifest or {}).get(key) or ()]
     return {os.path.normpath(e[0]).replace(os.sep, "/") for e in entries}
 
 
-# ---------------------------------------------------------------------------
-# report
-
-
 class _Report:
-    """Collects diagnostics; deduplicates and sorts them."""
-
     def __init__(self) -> None:
         self.items: list[tuple] = []
         self._seen: set[tuple] = set()
@@ -366,10 +319,6 @@ def _syntax_error(facts: dict, report: _Report) -> None:
     report.add(ERROR_, "syntax-error", line, col, col + 1, f"Syntax error: {msg}")
 
 
-# ---------------------------------------------------------------------------
-# helpers
-
-
 def _unique(items: Iterable[str | None]) -> list[str]:
     return list(dict.fromkeys(i for i in items if i))
 
@@ -389,8 +338,6 @@ def _vlabel(version: tuple[int, int]) -> str:
 
 
 def _segment_range(value: str, col: int, end: int, index: int, sep: str = ".") -> tuple[int, int]:
-    """Range of the ``index``-th ``sep``-separated segment of a token (the whole
-    token when its text contains escapes or wide characters)."""
     segs = value.split(sep)
     if end - col != len(value) or index >= len(segs):
         return col, end
@@ -398,33 +345,19 @@ def _segment_range(value: str, col: int, end: int, index: int, sep: str = ".") -
     return start, start + len(segs[index])
 
 
+# non-literal _name ('x.%s' % y): no MI_NAME, so the registry guesses the model (usually _inherit[0])
 def _misattributed(cls: Any) -> bool:
-    """A class whose ``_name`` was set by a chained assignment (``_name =
-    _description = 'x'``): the extractor misses it, so the registry files it
-    under its ``_inherit`` parent instead of under model 'x'."""
     return not cls.model_info.get(MI_NAME) and any(a[A_NAME] == "_name" for a in cls.facts[K_ATTRS])
 
 
 def _registry_cache(reg: Any) -> dict:
-    """Scratch space attached to the registry, reset whenever it changes."""
     cache = reg.__dict__.get("diagnostics_cache")
     if cache is None or cache.get("generation") != reg.generation:
         cache = reg.__dict__["diagnostics_cache"] = {"generation": reg.generation}
     return cache
 
 
-# ---------------------------------------------------------------------------
-# resolution against the registry
-
-
 class _Resolver:
-    """Registry lookups from the point of view of the current file's module.
-
-    Two effective scopes extend ``closure(module)`` with the modules Odoo
-    auto-installs as soon as their dependencies are installed (bridges such as
-    ``sale_stock``): at runtime all of them are present (``runtime``); while
-    the module loads, only those loaded before it (``scope``)."""
-
     def __init__(self, ctx: Any):
         reg = ctx.registry
         self.env = ctx.env
@@ -436,16 +369,16 @@ class _Resolver:
         self.label = ver.label if ver is not None else "?"
         self.cache = _registry_cache(reg)
         closure = ctx.scope or frozenset((self.module,))
+        # closure + auto_install bridges: runtime = all of them, scope = those loaded before this module
         self.scope, self.runtime = self._effective_scopes(closure)
         info = reg.module(self.module)
         manifest = reg.file_facts(info.manifest) if info is not None else None
-        # the depends of a broken manifest are unknown: no missing-dependency guesses
         self.deps_known = bool(manifest) and not manifest.get(ERROR)
         self.missing = sorted(m for m in closure if reg.module(m) is None)
         self.has_base = reg.module("base") is not None
         # a partial base (no ir.model) cannot tell which ir.* models exist
         self.full_base = reg.has_model("ir.model")
-        self._xmlids: dict[tuple, tuple[str, list[str]]] = {}  # data files repeat the same ids
+        self._xmlids: dict[tuple, tuple[str, list[str]]] = {}
 
     def _effective_scopes(self, closure: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
         key = ("scopes", self.module)
@@ -479,7 +412,6 @@ class _Resolver:
         return self.version >= version
 
     def adjust(self, severity: int, message: str) -> tuple[int, str]:
-        """Lower the severity when a dependency missing from the env could provide the symbol."""
         if not self.missing:
             return severity, message
         return min(severity + 1, HINT), f"{message} (unverified: dependency {_quote_list(self.missing)} is not in the addons path)"
@@ -488,22 +420,16 @@ class _Resolver:
         return _module_rel(self.reg, self.module, path)
 
     def loaded_by_manifest(self, path: str) -> bool:
-        """True if ``path`` is a data/demo file of the module's manifest."""
         return self.module_rel(path) in _manifest_files(self.reg, self.module)
 
     def ignore_dependencies(self) -> None:
-        """Code not loaded by the module itself (tests, populate data...) runs
-        with whatever is installed: resolve against the whole env."""
         self.deps_known = False
 
     def _within(self, modules: Iterable[str | None], runtime: bool) -> bool:
         scope = self.runtime if runtime else self.scope
         return any(m in scope for m in modules)
 
-    # -- models ------------------------------------------------------------------
-
     def model_status(self, model: str, runtime: bool = False) -> tuple[str, list[str]]:
-        """('ok' | 'unknown' | 'outside' | 'skip', modules defining the model)."""
         if not self.has_base or model.startswith("x_") or (model.startswith("ir.") and not self.full_base):
             return "skip", []
         classes = self.reg.model_classes(model)
@@ -511,16 +437,13 @@ class _Resolver:
             return ("skip" if model in self._unextracted_models() or self.dynamic_models(self.module) else "unknown"), []
         defs = [c.module for c in classes if c.is_definition]
         if not defs:
-            # only extended, defined nowhere: removed or renamed in this version
-            # (the classic "_inherit of a model that no longer exists" install error)
             return ("skip" if model in self._unextracted_models() or self.dynamic_models(self.module) else "unknown"), []
         if not self.deps_known or self._within(defs, runtime):
             return "ok", []
         return ("skip" if self.dynamic_models(self.module) else "outside"), _unique(defs)
 
+    # _name built at runtime ('x.%s' % y, f-string, call): the module's model refs cannot be checked
     def dynamic_models(self, module: str) -> bool:
-        """``module`` builds model names at runtime (``_name = 'x.%s' % name`` in
-        a loop, ``_name = model('x')``): its model references cannot be checked."""
         key = ("dynamic_models", module)
         hit = self.cache.get(key)
         if hit is None:
@@ -534,8 +457,6 @@ class _Resolver:
         return hit
 
     def _unextracted_models(self) -> set[str]:
-        """Models named by ``_name = _description = 'x'`` chained assignments:
-        the extractor keeps them as plain class attributes, the registry lacks them."""
         hit = self.cache.get("unextracted_models")
         if hit is None:
             hit = set()
@@ -549,9 +470,8 @@ class _Resolver:
             self.cache["unextracted_models"] = hit
         return hit
 
+    # all parents in scope, no Python mixin base: a member it lacks is really missing
     def model_closed(self, model: str) -> bool:
-        """True when ``model`` and all its parents are visible in scope and no
-        class has a Python mixin base: a member it lacks is really missing."""
         key = ("closed", model, self.scope)
         hit = self.cache.get(key)
         if hit is None:
@@ -570,7 +490,7 @@ class _Resolver:
             seen.add(m)
             own = reg.model_classes(m, self.scope)
             if not own:
-                return False  # the model or a parent is outside the scope
+                return False
             for c in own:
                 classes.append(c)
                 stack.extend(c.parents())
@@ -585,7 +505,6 @@ class _Resolver:
         return model == "base" or self.reg.model_kind(model) == "AbstractModel"
 
     def descendants(self, model: str) -> list[str]:
-        """Models inheriting ``model`` (transitively)."""
         key = ("descendants", model)
         hit = self.cache.get(key)
         if hit is None:
@@ -600,20 +519,11 @@ class _Resolver:
         return hit
 
     def suggest_model(self, model: str) -> str:
-        # only models that are actually defined somewhere (not the extension-only name itself)
         defined = [m for m in self.reg.model_names() if m != model and any(c.is_definition for c in self.reg.model_classes(m))]
         return _suggest(model, defined)
 
-    # -- members -------------------------------------------------------------------
-    #
-    # A field or method exists when any class of the model, of its parents
-    # (recursively), of 'base' or of the framework declares it - fields also
-    # through _inherits. Existence must not depend on the MRO linearization, and
-    # the union is cheap to compute and cache.
-
+    # a member exists if any class of model/parents/base/framework declares it: union, not MRO
     def _union(self, model: str, scope: frozenset[str] | None, delegated: bool) -> list:
-        """Classes contributing members to ``model`` (``delegated``: include the
-        ``_inherits`` parents, whose fields are delegated)."""
         key = ("union", model, scope, delegated)
         hit = self.cache.get(key)
         if hit is None:
@@ -639,8 +549,6 @@ class _Resolver:
         return hit
 
     def members(self, model: str, which: int, scope: frozenset[str] | None) -> dict[str, tuple]:
-        """name -> a definition tuple of every field (``which=K_FIELDS``) or method
-        of ``model`` visible in ``scope``; field definitions naming a comodel win."""
         key = ("members", model, which, scope)
         hit = self.cache.get(key)
         if hit is None:
@@ -663,7 +571,6 @@ class _Resolver:
         return hit
 
     def computes(self, model: str) -> set[str]:
-        """Names of the compute methods of the fields of ``model`` in scope."""
         key = ("computes", model, self.scope)
         hit = self.cache.get(key)
         if hit is None:
@@ -677,13 +584,10 @@ class _Resolver:
         return hit
 
     def declares(self, model: str, name: str, which: int, module: str | None = None) -> bool:
-        """A class of ``model`` (or of its parents) declares ``name`` itself
-        (``module``: a class of that module), delegation excluded."""
         classes = self._union(model, self.scope if module is None else None, False)
         return any((module is None or c.module == module) and any(m[F_NAME] == name for m in c.facts[which]) for c in classes)
 
     def field_status(self, model: str, name: str, runtime: bool = False) -> tuple[str, list[str], tuple | None]:
-        """('ok' | 'unknown' | 'outside', modules providing it, a definition)."""
         fdef = self.members(model, K_FIELDS, self.runtime if runtime else self.scope).get(name)
         if fdef is not None:
             return "ok", [], fdef
@@ -706,12 +610,9 @@ class _Resolver:
         return ("outside" if modules else "unknown"), modules
 
     def member_of_any(self, models: Iterable[str], name: str, which: int) -> bool:
-        """``name`` is a field/method of one of ``models`` (whole env)."""
         return any(name in self.members(m, which, None) for m in models)
 
     def _providers(self, model: str, name: str, which: int) -> list[str]:
-        """Modules outside the scope whose classes bring member ``name`` to
-        ``model``: they declare it or inherit a parent model declaring it."""
         out = []
         for c in self._union(model, None, which == K_FIELDS):
             if c.module is None or c.module in self.scope:
@@ -720,9 +621,8 @@ class _Resolver:
                 out.append(c.module)
         return _unique(out)
 
+    # Odoo's default (_auto, False on abstract models); registry._log_access defaults to True
     def _log_access(self, model: str) -> bool:
-        """``_log_access`` as Odoo derives it from the model's own classes (the
-        registry also looks at mixins, whose ``_auto = False`` does not count)."""
         classes = self.reg.model_classes(model)
         auto = None
         for c in reversed(classes):
@@ -737,18 +637,16 @@ class _Resolver:
                 log = bool(attrs["_log_access"])
         return log
 
+    # vals pseudo-fields in create/write (account.account 'prefix'), setattr fields (ir.rule 'global')
     def mentioned_in_code(self, model: str, name: str) -> bool:
-        """True if a Python file of ``model`` quotes ``name``: create()/write()
-        overrides may accept pseudo-fields (account.account 'prefix'), fields may
-        be attached with setattr() (ir.rule 'global')."""
         key = ("mentioned", model, name)
         hit = self.cache.get(key)
         if hit is None:
             q = rf"""['"]{re.escape(name)}['"]"""
             rx = re.compile(
-                rf"""(?:\b\w*val\w*\s*(?:\.\s*(?:get|pop|setdefault)\s*\(\s*|\[\s*){q})"""  # vals.get('x') / vals['x']
-                rf"""|(?:{q}\s+(?:not\s+)?in\s+\w*val)"""  # 'x' in vals
-                rf"""|(?:setattr\s*\([^,]+,\s*{q})|(?:locals\s*\(\s*\)\s*\[\s*{q})"""  # setattr(cls, 'x', ...) / locals()['x'] = fields.X()
+                rf"""(?:\b\w*val\w*\s*(?:\.\s*(?:get|pop|setdefault)\s*\(\s*|\[\s*){q})"""
+                rf"""|(?:{q}\s+(?:not\s+)?in\s+\w*val)"""
+                rf"""|(?:setattr\s*\([^,]+,\s*{q})|(?:locals\s*\(\s*\)\s*\[\s*{q})"""
             )
             paths = _unique(c.path for c in self.reg.model_classes(model))
             hit = self.cache[key] = any(rx.search(self.documents.text(p) or "") for p in paths)
@@ -761,13 +659,8 @@ class _Resolver:
         comodel = fdef[F_COMODEL] or (fdef[F_ARGS] or {}).get("comodel_name")
         return comodel if isinstance(comodel, str) else None
 
+    # None: resolves or unjudgeable; else (segment index, 'unknown'|'outside'|'nonrel', model, detail)
     def walk(self, model: str, path: str, transient_only: bool = False) -> tuple[int, str, str, Any] | None:
-        """Check a dotted field path starting on ``model``.
-
-        None when it resolves or cannot be judged, else ``(segment index,
-        problem, model, detail)`` with problem 'unknown', 'outside' (detail:
-        modules providing the field) or 'nonrel' (detail: (field, type) it
-        cannot follow)."""
         cur = model
         segs = path.split(".")
         for i, seg in enumerate(segs):
@@ -778,7 +671,7 @@ class _Resolver:
                 return None
             if status == "unknown":
                 if seg.startswith("x_"):
-                    return None  # manual / Studio field: cannot be judged statically
+                    return None
                 return i, "unknown", cur, None
             if status == "outside":
                 return i, "outside", cur, modules
@@ -793,7 +686,6 @@ class _Resolver:
         return None
 
     def walk_steps(self, model: str | None, steps: tuple) -> str | None:
-        """Model reached from ``model`` through the relational fields ``steps``."""
         for name in steps:
             if model is None:
                 return None
@@ -807,8 +699,6 @@ class _Resolver:
         return self.unimported_member(model, name, K_METHODS) or _suggest(name, self.members(model, K_METHODS, self.scope))
 
     def unimported_member(self, model: str, name: str, index: int) -> str:
-        """Message tail when field / method ``name`` of ``model`` is declared in a
-        never-imported file (a forgotten ``from . import x``), else ''."""
         hit = self.cache.get("unimported_members")
         if hit is None:
             hit = {}
@@ -833,10 +723,7 @@ class _Resolver:
             return ""
         return f"; it is declared in {found[0]}:{found[1]}, a file its module never imports (add it to the package's __init__.py)"
 
-    # -- xml ids -----------------------------------------------------------------------
-
     def xmlid_status(self, xmlid: str, runtime: bool = False) -> tuple[str, list[str]]:
-        """('ok' | 'unknown' | 'outside' | 'skip', [module of the id])."""
         key = (xmlid, runtime, self.deps_known)
         hit = self._xmlids.get(key)
         if hit is None:
@@ -857,8 +744,6 @@ class _Resolver:
         return "outside", [module]
 
     def suggest_xmlid(self, xmlid: str) -> str:
-        """A close id of the same module, the implicit id of a close model name,
-        or the same name in another module (records move between modules)."""
         module, _, local = xmlid.partition(".")
         if local.startswith("model_"):
             match = difflib.get_close_matches(local[6:], list(self._underscored()), n=1, cutoff=0.8)
@@ -868,8 +753,7 @@ class _Resolver:
                 owner = module if module in modules else next((c.module for c in self.reg.model_classes(model) if c.is_definition), None)
                 if owner:
                     return f"; did you mean '{owner}.model_{match[0]}'?"
-        # ids grouped by module and by local name, built once per registry generation
-        # (rescanning ~200k ids for every unknown id made a publish take 150-300 ms)
+        # built once per registry generation: rescanning ~200k ids per unknown id cost 150-300 ms
         by_module, by_local = self._xmlid_tables()
         match = difflib.get_close_matches(local, by_module.get(module, ()), n=1, cutoff=0.8)
         if match:
@@ -889,8 +773,8 @@ class _Resolver:
             hit = self.cache["xmlid_tables"] = (by_module, by_local)
         return hit
 
+    # QWeb t-call resolves view keys (<field name="key">) before xml ids
     def template_key_exists(self, key: str) -> bool:
-        """QWeb ``t-call`` resolves view keys (``<field name="key">``) before xml ids."""
         keys = self.cache.get("template_keys")
         if keys is None:
             keys = set()
@@ -902,9 +786,8 @@ class _Resolver:
             self.cache["template_keys"] = keys
         return key in keys
 
+    # ids Odoo creates itself: model_/field_/selection__/constraint_, base.module_*, _inherits parents
     def _implicit_exists(self, module: str, local: str) -> bool:
-        """Ids Odoo creates without data files: model_/field_/selection__/
-        constraint_ reflection, base.module_*, ``_inherits`` parent records."""
         if local.startswith(("selection__", "constraint_")) or (module == "base" and local.startswith("module_")):
             return True
         if local.startswith(("model_", "field_")) and (
@@ -949,7 +832,6 @@ class _Resolver:
         return hit
 
     def _dynamic_ids(self) -> set[str]:
-        """Ids created by ``<function model="ir.model.data" name="_update_xmlids">``."""
         hit = self.cache.get("dynamic_ids")
         if hit is None:
             hit = set()
@@ -959,11 +841,8 @@ class _Resolver:
             self.cache["dynamic_ids"] = hit
         return hit
 
+    # Python-created ids ('xml_id' keys) or opaque ones (SQL, ir.model.data create); base's are implicit
     def _creates_ids(self, module: str, xmlid: str) -> bool:
-        """``module``'s Python code creates ``xmlid`` (``'xml_id': '...'`` values
-        passed to ``_load_records`` & co) or creates ids it does not spell out
-        (raw SQL into ir_model_data, ``_update_xmlids``, ``ir.model.data``
-        create); base's own creations are the implicit ids above."""
         key = ("creates_ids", module)
         hit = self.cache.get(key)
         if hit is None:
@@ -987,7 +866,6 @@ class _Resolver:
         return hit[1] or xmlid in hit[0]
 
     def unimported_model_file(self, model: str) -> str | None:
-        """Path (relative to its addons root) of a never-imported file defining ``model``."""
         hit = self.cache.get("unimported_models")
         if hit is None:
             hit = {}
@@ -1005,7 +883,6 @@ class _Resolver:
         return hit.get(model)
 
     def manual_fields(self, module: str) -> bool:
-        """True if ``module`` declares ``ir.model.fields`` records (x_ fields)."""
         key = ("manual_fields", module)
         hit = self.cache.get(key)
         if hit is None:
@@ -1019,14 +896,9 @@ class _Resolver:
         return hit
 
 
-# ---------------------------------------------------------------------------
-# reports shared by the checkers
-
-
 def _report_model(
     report: _Report, res: _Resolver, model: str, pos: tuple[int, int, int], severity: int, context: str, inherit: bool = False, runtime: bool = False
 ) -> None:
-    """unknown-model / missing-dependency for a model name reference."""
     status, modules = res.model_status(model, runtime)
     line, col, end = pos
     if status == "unknown":
@@ -1072,19 +944,13 @@ def _report_xmlid(
         _report_missing_dep(report, res, f"External ID '{xmlid}' ({context})", modules, pos)
 
 
-# ---------------------------------------------------------------------------
-# Python
-
-
 class _ClassCtx:
-    """A model class of the current file, as the registry sees it."""
-
     __slots__ = ("facts", "model", "registered", "abstract")
 
     def __init__(self, facts: tuple, model: str, registered: bool, abstract: bool):
         self.facts = facts
         self.model = model
-        self.registered = registered  # part of the registry (not tests/, not _register=False)
+        self.registered = registered
         self.abstract = abstract
 
     @property
@@ -1104,14 +970,12 @@ class _PythonChecker:
         self.facts = facts
         self.report = report
         dirs = (res.module_rel(ctx.path) or "").split("/")[:-1]
-        # migration scripts name models/fields that no longer exist on purpose
         self.skip = bool(UNLOADED_DIRS.intersection(dirs) - {"tests"})
         self.tests = "tests" in dirs or "populate" in dirs
         self.text = ctx.text
         self._lines: list[str] | None = None
         self._guards: dict[str, bool] = {}
         self.classes = self._classes()
-        # models defined in this file (test models are not in the registry)
         self.local_models = {c.model for c in self.classes if c.facts[K_MODEL].get(MI_NAME) == c.model and c.model not in c.facts[K_MODEL].get(MI_INHERIT, ())}
 
     def _classes(self) -> list[_ClassCtx]:
@@ -1128,8 +992,6 @@ class _PythonChecker:
             out.append(_ClassCtx(cls, model, registered, registered and self.res.is_abstract(model)))
         return out
 
-    # -- text helpers ------------------------------------------------------------
-
     @property
     def lines(self) -> list[str]:
         if self._lines is None:
@@ -1141,7 +1003,6 @@ class _PythonChecker:
         return lines[n] if 0 <= n < len(lines) else ""
 
     def _find(self, first: int, last: int, pattern: re.Pattern, group: int = 0) -> tuple[int, int, int] | None:
-        """Position of the last match of ``pattern`` on lines first..last."""
         found = None
         for n in range(max(0, first), last + 1):
             line = self._line(n)
@@ -1149,10 +1010,8 @@ class _PythonChecker:
                 found = (n, utf16_len(line[: m.start(group)]), utf16_len(line[: m.end(group)]))
         return found
 
+    # literal inside a comment or a larger string (generated code)
     def _inert(self, line: int, col: int) -> bool:
-        """Whether the string literal starting before ``col`` is commented out or
-        part of a larger string (generated code): references are found by
-        regular expressions over the whole text."""
         text = self._line(line)[: max(0, utf16_to_index(self._line(line), col) - 1)]
         quote = None
         for ch in text:
@@ -1181,8 +1040,6 @@ class _PythonChecker:
         f = self._field_def(cls, line)
         return f[F_NAME] if f is not None else None
 
-    # -- run -------------------------------------------------------------------------
-
     def run(self) -> None:
         if self.skip:
             return
@@ -1191,7 +1048,7 @@ class _PythonChecker:
         if self.res.since((18, 0)):
             self._user_has_groups()
         if self.tests:
-            return  # test code may target modules/records that are optional or long gone behind skip()s
+            return  # tests may target optional or removed records behind skip()s
         for ref in self.facts.get(REFS) or ():
             kind = ref[R_KIND]
             role = ref[R_CTX][0]
@@ -1206,8 +1063,6 @@ class _PythonChecker:
             elif kind == REF_XMLID and role in ("ref", "groups"):
                 self._xmlid_ref(ref, role)
 
-    # -- models ----------------------------------------------------------------------
-
     def _model_ref(self, ref: tuple, role: str) -> None:
         model = ref[R_VALUE]
         if model in self.local_models or role == "_name":
@@ -1219,7 +1074,7 @@ class _PythonChecker:
             cls = self.class_at(ref[R_LINE])
             field = self._field_def(cls, ref[R_LINE]) if cls is not None else None
             if field is not None and "related" in (field[F_ARGS] or {}):
-                return  # a related field takes its comodel from the target field
+                return
             name = field[F_NAME] if field is not None else None
             _report_model(self.report, self.res, model, pos, ERROR_, f"comodel of field '{name}'" if name else "comodel")
         elif role == "env" or role == "res_model":
@@ -1229,9 +1084,6 @@ class _PythonChecker:
                 _report_model(self.report, self.res, model, pos, WARNING, "env[...]" if role == "env" else "res_model", runtime=True)
 
     def _guarded(self, model: str, line: int) -> bool:
-        """The code copes with a missing model: ``'x' in self.env`` /
-        ``env.get('x')`` in the file, or an optional-module test (``'f' in
-        self._fields``, ``'m' in self.env``...) in the enclosing method."""
         hit = self._guards.get(model)
         if hit is None:
             q = re.escape(model)
@@ -1243,8 +1095,6 @@ class _PythonChecker:
         return hit or self._method_guarded(line, model)
 
     def _method_guarded(self, line: int, model: str | None = None) -> bool:
-        """The enclosing function tests for an optional module (``'f' in
-        self._fields``, ``hasattr(...)``, module state, ``model == 'x'``...)."""
         span = self._method_span(line)
         if span is None:
             return False
@@ -1264,15 +1114,13 @@ class _PythonChecker:
                 return sym[S_LINE], sym[S_END_LINE]
         return None
 
-    # -- fields ----------------------------------------------------------------------
-
     def _field_ref(self, ref: tuple, role: str) -> None:
         severity, label = PY_FIELD_ROLES[role]
         value = ref[R_VALUE]
         line, col, end = ref[R_LINE], ref[R_COL], ref[R_END_COL]
         cls = self.class_at(line)
         if role in ("inverse_name", "domain"):
-            model = ref[R_CTX][1]  # the comodel
+            model = ref[R_CTX][1]
             if not model or self.res.model_status(model)[0] != "ok":
                 return
         else:
@@ -1280,13 +1128,13 @@ class _PythonChecker:
                 return
             model = cls.model
             if self.res.model_status(model)[0] == "unknown":
-                return  # the model itself is reported (unknown-model): no cascade of field errors
+                return
         path = value
         if role == "_order":
             path = value.strip('"').split(".", 1)[0].split(":", 1)[0]
             if value.startswith('"'):
                 col, end = col + 1, col + 1 + len(path)
-        resolved = True  # Odoo resolves this reference (and fails when it is wrong)
+        resolved = True
         if role == "depends" and cls is not None:
             state = self._depends_state(cls, line)
             if state == "replaced":
@@ -1307,7 +1155,7 @@ class _PythonChecker:
             return
         if not resolved:
             if kind != "unknown":
-                return  # e.g. override of a compute whose field lives in a module outside the scope
+                return
             severity = WARNING
         segs = path.split(".")
         seg = segs[index] if index < len(segs) else path
@@ -1324,10 +1172,8 @@ class _PythonChecker:
         sev, msg = self.res.adjust(severity, msg)
         self.report.add(sev, "unknown-field", line, c0, c1, msg)
 
+    # 'compute': Odoo resolves it; 'replaced': an outer @api.depends wins; 'other': never resolved
     def _depends_state(self, cls: _ClassCtx, line: int) -> str:
-        """'compute' when Odoo resolves the ``@api.depends`` at ``line`` (decorating
-        the compute method of a field in scope), 'replaced' when an outer
-        ``@api.depends`` overrides it, else 'other' (never resolved)."""
         methods = cls.facts[K_METHODS]
         index = next((i for i, m in enumerate(methods) if m[M_LINE] >= line), None)
         if index is None:
@@ -1340,12 +1186,9 @@ class _PythonChecker:
         return "compute" if method[M_NAME] in self.res.computes(cls.model) else "other"
 
     def _late_bound_ok(self, model: str, path: str) -> bool:
-        """An abstract mixin's path/method resolved on (some of) its inheritors."""
         if model == "base":
             return bool(self.reg.models_with_member(path.split(".", 1)[0]))
         return any(self.res.walk(d, path) is None for d in self.res.descendants(model))
-
-    # -- methods ---------------------------------------------------------------------
 
     def _method_ref(self, ref: tuple, role: str) -> None:
         name = ref[R_VALUE]
@@ -1372,8 +1215,6 @@ class _PythonChecker:
         sev, msg = self.res.adjust(ERROR_, msg)
         self.report.add(sev, "unknown-method", line, col, end, msg)
 
-    # -- xml ids ---------------------------------------------------------------------
-
     def _xmlid_ref(self, ref: tuple, role: str) -> None:
         if role == "groups":
             # has_group() and field groups= tolerate groups of modules not installed
@@ -1387,7 +1228,6 @@ class _PythonChecker:
         _report_xmlid(self.report, self.res, ref[R_VALUE], (ref[R_LINE], ref[R_COL], ref[R_END_COL]), WARNING, context, runtime=True, dependency=not guarded)
 
     def _lookup_call(self, ref: tuple) -> tuple[str, bool]:
-        """(called method, True if the lookup tolerates a missing id)."""
         line = self._line(ref[R_LINE])
         start = utf16_to_index(line, ref[R_COL])
         stop = utf16_to_index(line, ref[R_END_COL])
@@ -1397,7 +1237,7 @@ class _PythonChecker:
         if call == "ref" and (m is None or m.group(1) not in ("env", "self", "cls")):
             return call, True  # e.g. account.chart.template.ref(): template ids, not xml ids
         if re.match(r"""['"]\s*(?:[+%]|\.format\()""", tail):
-            return call, True  # 'module.prefix_' + suffix
+            return call, True
         n = ref[R_LINE]
         while ")" not in tail and n < ref[R_LINE] + 4:
             n += 1
@@ -1406,8 +1246,6 @@ class _PythonChecker:
         if call in SOFT_LOOKUPS:
             return call, "raise_if_not_found=True" not in tail.replace(" ", "")
         return call, _NOT_FOUND_FALSE_RE.search(tail) is not None
-
-    # -- classes (version checks) --------------------------------------------------------
 
     def _check_class(self, c: _ClassCtx) -> None:
         cls = c.facts
@@ -1455,8 +1293,8 @@ class _PythonChecker:
             pos = self._find(f[F_LINE], f[F_END_LINE], re.compile(r"\b" + kw + r"\s*=")) or (f[F_LINE], f[F_COL], f[F_END_COL])
             self.report.add(severity, "deprecated", pos[0], pos[1], pos[1] + len(kw), f"{msg} (field '{f[F_NAME]}')")
 
+    # 19.0+: the _inherits many2one is no longer created automatically
     def _inherits_links(self, c: _ClassCtx) -> None:
-        """19.0+: the many2one of ``_inherits`` is no longer created automatically."""
         inherits = c.facts[K_MODEL].get(MI_INHERITS) or {}
         if not inherits:
             return
@@ -1477,7 +1315,7 @@ class _PythonChecker:
 
     def _user_has_groups(self) -> None:
         if self.reg.models_with_member("user_has_groups"):
-            return  # a module of the env defines it (compatibility shim)
+            return
         src = self.ctx.source
         if b"user_has_groups(" not in src:
             return
@@ -1488,24 +1326,16 @@ class _PythonChecker:
             self.report.add(ERROR_, "deprecated", line, c0, c1, msg)
 
 
-# ---------------------------------------------------------------------------
-# XML
-
-
 class _View:
-    """An ``ir.ui.view`` record of the current file as seen by :class:`_XmlScan`."""
-
     __slots__ = ("xmlid", "model", "inherit", "vtype", "root", "items")
 
     def __init__(self, xmlid: str | None):
         self.xmlid = xmlid
-        self.model: str | None = None  # <field name="model">
-        self.inherit: str | None = None  # <field name="inherit_id" ref="...">
-        self.vtype: str | None = None  # <field name="type">
-        self.root: str | None = None  # arch root tag
-        # (kind, name, byte span, steps): kind 'field' | 'button' | 'attrs' | 'tree' |
-        # 'tree-mode' | 'tree-ref' | 'xpath-tree'; steps = x2many/groupby fields
-        # leading from the arch root (or the inheritance spec) to the element
+        self.model: str | None = None
+        self.inherit: str | None = None
+        self.vtype: str | None = None
+        self.root: str | None = None
+        # (kind, name, byte span | None, steps: x2many/groupby fields from arch root or spec to element)
         self.items: list[tuple] = []
 
 
@@ -1516,26 +1346,23 @@ class _Frame:
         self.view: _View | None = None
         self.record = False
         self.record_model: str | None = None
-        self.arch = False  # inside a view arch
-        self.arch_field = False  # the <field name="arch"> element itself
-        self.attributes = False  # inside a position="attributes" inheritance spec
+        self.arch = False
+        self.arch_field = False
+        self.attributes = False
         self.steps: tuple = ()
-        self.field: str | None = None  # arch <field name>: sub-views switch to its comodel
-        self.groupby: str | None = None  # arch <groupby name>: children use its comodel
-        self.capture: str | None = None  # record field whose text is collected
+        self.field: str | None = None
+        self.groupby: str | None = None
+        self.capture: str | None = None
         self.text_start = -1
-        self.opaque = False  # QWeb / html content: nothing to check
+        self.opaque = False
 
 
+# expat pass for what facts lack: arch element model context, attribute spans, record field texts
 class _XmlScan:
-    """One expat pass over an XML data file collecting what the facts lack:
-    the model context of every view arch element (sub-views, ``<groupby>``),
-    attribute positions for the version checks and a few record field texts."""
-
     def __init__(self, src: bytes):
         self.src = src
         self.views: list[_View] = []
-        self.texts: list[tuple[str | None, str, int, int]] = []  # (record model, field name, text byte span)
+        self.texts: list[tuple[str | None, str, int, int]] = []
         self._stack: list[_Frame] = []
         self._rx: dict[tuple[str, bool], re.Pattern] = {}
         self._p = parser = expat.ParserCreate()
@@ -1548,7 +1375,6 @@ class _XmlScan:
             pass  # reported from the facts
 
     def attr_span(self, ts: int, te: int, name: str, value: bool = True) -> tuple[int, int] | None:
-        """Byte span of attribute ``name``'s value (or of its name) in the start tag [ts, te)."""
         rx = self._rx.get((name, value))
         if rx is None:
             rx = self._rx[(name, value)] = re.compile(rb"""(?:^|[\s<])(""" + re.escape(name.encode()) + rb""")\s*=\s*(["'])(.*?)\2""", re.S)
@@ -1620,7 +1446,6 @@ class _XmlScan:
         f.arch = True
         f.view = view
         if parent.attributes:
-            # only <attribute> children of a position="attributes" spec are applied
             f.attributes = True
             if tag == "attribute" and attrs.get("name") in ("attrs", "states"):
                 view.items.append(("attrs", attrs["name"], self.attr_span(ts, te, "name"), ()))
@@ -1693,7 +1518,6 @@ class _XmlChecker:
         self.facts = facts
         self.report = report
         dirs = (res.module_rel(ctx.path) or "").split("/")[:-1]
-        # static/ (owl templates), migrations, test fixtures (often broken on purpose)
         self.skip = bool(UNLOADED_DIRS.intersection(dirs))
         if not res.loaded_by_manifest(ctx.path):
             res.ignore_dependencies()
@@ -1707,7 +1531,6 @@ class _XmlChecker:
         return self._index
 
     def _pos(self, span: tuple[int, int]) -> tuple[int, int, int]:
-        """Byte span -> (line, col, end_col), clipped to the first line."""
         start, end = span
         nl = self.ctx.source.find(b"\n", start, end)
         return self.index.span(start, end if nl < 0 else nl)
@@ -1723,8 +1546,6 @@ class _XmlChecker:
                 self._view(view)
             if self.res.since((18, 0)):
                 self._texts(scan)
-
-    # -- facts references ----------------------------------------------------------------
 
     def _refs(self) -> None:
         records = self.facts.get(RECORDS) or ()
@@ -1747,7 +1568,7 @@ class _XmlChecker:
             return
         line = self._line(ref[R_LINE])
         if role == "eval" and _NOT_FOUND_FALSE_RE.search(line[utf16_to_index(line, ref[R_END_COL]) :].split(")", 1)[0]):
-            return  # ref('x', raise_if_not_found=False)
+            return
         xmlid = self.reg.qualify_xmlid(value, self.res.module)
         runtime = self._runtime_ref(role, line, ref[R_COL])
         if role == "tcall" and self.res.xmlid_status(xmlid)[0] == "unknown" and self.res.template_key_exists(xmlid):
@@ -1763,10 +1584,9 @@ class _XmlChecker:
                 return rec[X_TAG] == "template" or (rec[X_INFO] or {}).get("view_type") == "qweb"
         return False
 
+    # resolved when the view is used (t-call, *_view_ref, arch on_create...), not at data load
     @staticmethod
     def _runtime_ref(role: str, line: str, col: int) -> bool:
-        """References resolved when the view is used (t-call, *_view_ref, arch
-        on_create / quick_create_view / button names), not when data loads."""
         if role in ("tcall", "view_ref"):
             return True
         if role not in ("ref", "action"):
@@ -1799,7 +1619,7 @@ class _XmlChecker:
         if status == "outside":
             _report_missing_dep(self.report, res, f"Field '{model}.{name}' ({where})", modules, pos)
             return
-        if name.startswith("x_") or res.mentioned_in_code(model, name):  # x_: manual / Studio fields
+        if name.startswith("x_") or res.mentioned_in_code(model, name):
             return
         new = FIELD_RENAMES_19.get(name)
         if new and res.since((19, 0)) and new in res.members(model, K_FIELDS, res.scope):
@@ -1824,8 +1644,6 @@ class _XmlChecker:
             sev, msg = res.adjust(WARNING, f"Method '{name}' called by <function> is not defined on model '{model}'{res.suggest_method(model, name)}")
             self.report.add(sev, "unknown-method", *pos, msg)
 
-    # -- views ----------------------------------------------------------------------
-
     def _view(self, view: _View) -> None:
         if view.vtype == "qweb":
             return
@@ -1841,8 +1659,6 @@ class _XmlChecker:
                 self._primary_items(view, view.model)
 
     def _spec_context(self, view: _View) -> tuple[str, set[str]] | None:
-        """(view model, models whose fields the inherited arch can contain) of an
-        inheriting view, or None when it is QWeb or cannot be resolved."""
         reg = self.reg
         cur: str | None = reg.qualify_xmlid(view.inherit, self.res.module)
         chain = []
@@ -1857,7 +1673,7 @@ class _XmlChecker:
             parent = rec.info.get("inherit_id")
             cur = reg.qualify_xmlid(parent, rec.module) if parent else None
         if not chain or not reg.view_model(chain[-1]):
-            return None  # QWeb views have no model
+            return None
         own = view.model or reg.view_model(chain[0])
         if not own or self.res.model_status(own)[0] != "ok":
             return None
@@ -1865,10 +1681,8 @@ class _XmlChecker:
         models.add(own)
         return own, models
 
+    # a spec can locate any element of the inherited view tree: models of all of them + comodels
     def _tree_models(self, root: Any) -> set[str]:
-        """Models of every arch element of the views inheriting ``root`` (all
-        modules), plus the comodels of their relational fields: an inheritance
-        spec can locate (and extend) any of them."""
         key = ("view_tree_models", root.xmlid)
         hit = self.res.cache.get(key)
         if hit is not None:
@@ -1920,7 +1734,7 @@ class _XmlChecker:
                 continue
             pos = self._pos(span)
             if kind == "field":
-                if name.startswith("x_"):  # manual / Studio fields (maybe declared by a dependency)
+                if name.startswith("x_"):
                     continue
                 msg = f"Field '{name}' does not exist on model '{own}' nor in the views it inherits ('{view.inherit}'){res.suggest_field(own, name)}"
                 sev, msg = res.adjust(ERROR_, msg)
@@ -1991,7 +1805,6 @@ class _XmlChecker:
                 self.report.add(ERROR_, "deprecated-tree", *self._pos(span), msg)
 
     def _texts(self, scan: _XmlScan) -> None:
-        """18.0+: 'tree' in act_window view_mode, view type, tree_view_ref contexts."""
         src = self.ctx.source
         for model, name, start, end in scan.texts:
             raw = src[start:end].decode("utf-8", "replace")
@@ -2006,10 +1819,6 @@ class _XmlChecker:
             for m in rx.finditer(raw):
                 b0 = start + len(raw[: m.start()].encode())
                 self.report.add(ERROR_, "deprecated-tree", *self._pos((b0, b0 + len(m.group()))), msg)
-
-
-# ---------------------------------------------------------------------------
-# CSV
 
 
 class _CsvChecker:
@@ -2052,10 +1861,6 @@ class _CsvChecker:
         elif status == "unknown" and not name.startswith("x_") and not res.mentioned_in_code(model, name):
             sev, msg = res.adjust(ERROR_, f"Column '{name}' is not a field of model '{model}'{res.suggest_field(model, name)}")
             self.report.add(sev, "unknown-field", *pos, msg)
-
-
-# ---------------------------------------------------------------------------
-# manifest
 
 
 def _check_manifest(ctx: Any, res: _Resolver, facts: dict, report: _Report) -> None:

@@ -1,9 +1,3 @@
-"""Tests for find references (odoo_lens/features/references.py).
-
-Python usages come from ``analysis.python.member_usages``; most tests replace it
-with a table-driven fake so that the receiver filtering is tested on its own.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -23,7 +17,7 @@ from odoo_lens.documents import uri_to_path  # noqa: E402
 from odoo_lens.extract import extract_source  # noqa: E402
 from odoo_lens.server import RequestContext  # noqa: E402
 
-# the package attribute ``odoo_lens.features.references`` is the entry point function
+# features.references is the entry-point function, not this submodule
 R = importlib.import_module("odoo_lens.features.references")
 
 MINI = os.path.join(ROOT, "tests", "fixtures", "mini")
@@ -51,7 +45,6 @@ def line_of(rel: str, line1: int) -> str:
 
 
 def spot(rel: str, line1: int, token: str, nth: int = 0) -> tuple[str, int, int]:
-    """(rel, 0-based line, col) of the ``nth`` occurrence of ``token`` on 1-based ``line1``."""
     text = line_of(rel, line1)
     col = -1
     for _ in range(nth + 1):
@@ -65,8 +58,6 @@ def usage(rel: str, line1: int, name: str, receivers: list[str] | None, kind: st
 
 
 class FakeUsages:
-    """Stand-in for analysis.python.member_usages: {(rel, name): [usage]}."""
-
     def __init__(self, table: dict | None = None):
         self.table = {(fx(rel), name): v for (rel, name), v in (table or {}).items()}
         self.calls: list[tuple[str, str]] = []
@@ -92,7 +83,7 @@ class _FixtureCase(unittest.TestCase):
         cls.reg = cls.env.registry
 
     def setUp(self):
-        R._INDEXES.clear()  # per-registry caches (incl. cached usages of the fake)
+        R._INDEXES.clear()  # the per-registry index also caches the fake's usages
 
     def ctx(self, rel: str, line: int = 0, col: int = 0) -> RequestContext:
         return RequestContext(self.server, self.env, self.reg, fx(rel), line, col)
@@ -108,23 +99,23 @@ class FieldReferencesTest(_FixtureCase):
         (SALE, "partner_id"): [usage(SALE, 30, "partner_id", ["sale.order"], "attr"), usage(SALE, 43, "partner_id", ["sale.order"], "attr")],
         (MY, "partner_id"): [
             usage(MY, 15, "partner_id", ["sale.order"], "attr"),
-            usage(MY, 21, "partner_id", ["res.company"], "attr"),  # another model's partner_id
-            usage(MY, 8, "partner_id", ["sale.order"], "string"),  # same spot as the related= index ref
-            usage(MY, 15, "partner_id", None, "attr"),  # unknown receiver, common name: dropped
+            usage(MY, 21, "partner_id", ["res.company"], "attr"),
+            usage(MY, 8, "partner_id", ["sale.order"], "string"),
+            usage(MY, 15, "partner_id", None, "attr"),
         ],
     }
 
     def test_sale_order_partner_id(self):
         res = self.refs(Target(FIELD, model="sale.order", name="partner_id"), usages=self.USAGES)
         expected = [
-            spot(SALE, 12, "partner_id"),  # definition
-            spot(SALE_STOCK, 8, "partner_id"),  # redefinition in an extension
-            spot(SALE, 17, "partner_id"),  # related='partner_id.country_id.code'
-            spot(MY, 8, "partner_id"),  # related in a customer module
-            spot(MY, 12, "partner_id"),  # @api.depends('partner_id.namee')
-            spot(SALE_VIEWS, 11, "partner_id"),  # view arch
-            spot(MY_VIEWS, 8, "partner_id"),  # inherited view spec (model via inherit_id)
-            spot(SALE, 30, "partner_id"),  # usages with an inferred receiver
+            spot(SALE, 12, "partner_id"),
+            spot(SALE_STOCK, 8, "partner_id"),
+            spot(SALE, 17, "partner_id"),
+            spot(MY, 8, "partner_id"),
+            spot(MY, 12, "partner_id"),
+            spot(SALE_VIEWS, 11, "partner_id"),
+            spot(MY_VIEWS, 8, "partner_id"),
+            spot(SALE, 30, "partner_id"),
             spot(SALE, 43, "partner_id"),
             spot(MY, 15, "partner_id"),
         ]
@@ -132,10 +123,9 @@ class FieldReferencesTest(_FixtureCase):
             self.assertIn(s, res)
         self.assertEqual(len(res), len(set(res)))
         self.assertEqual(len(res), len(expected))
-        self.assertNotIn(spot(MY, 21, "partner_id"), res)  # company.partner_id
-        self.assertNotIn(spot(COMPANY, 8, "partner_id"), res)  # res.company's related path
-        self.assertEqual(res[0][0], SALE)  # current file first
-        # declarations only when asked
+        self.assertNotIn(spot(MY, 21, "partner_id"), res)
+        self.assertNotIn(spot(COMPANY, 8, "partner_id"), res)
+        self.assertEqual(res[0][0], SALE)
         res = self.refs(Target(FIELD, model="sale.order", name="partner_id"), include=False, usages=self.USAGES)
         self.assertNotIn(spot(SALE, 12, "partner_id"), res)
         self.assertNotIn(spot(SALE_STOCK, 8, "partner_id"), res)
@@ -148,43 +138,41 @@ class FieldReferencesTest(_FixtureCase):
             rel = os.path.relpath(uri_to_path(loc["uri"]), MINI)
             start, end = loc["range"]["start"], loc["range"]["end"]
             texts[(rel, start["line"])] = line_of(rel, start["line"] + 1)[start["character"] : end["character"]]
-        self.assertEqual(set(texts.values()), {"country_id"})  # the segment, not the whole path string
-        self.assertIn((SALE, 16), texts)  # 'partner_id.country_id.code': second segment, owned by res.partner
+        self.assertEqual(set(texts.values()), {"country_id"})
+        self.assertIn((SALE, 16), texts)
         self.assertIn((MY, 7), texts)
 
     def test_unknown_receivers_only_for_unique_names(self):
         table = {(MY, "x_note"): [usage(MY, 15, "x_note", None, "attr")]}
         res = self.refs(Target(FIELD, model="sale.order", name="x_note"), usages=table)
         self.assertIn(spot(MY, 15, "x_note"), res)
-        self.assertIn(spot(MY, 7, "x_note"), res)  # declaration
+        self.assertIn(spot(MY, 7, "x_note"), res)
 
     def test_record_fields_and_secondary_rank(self):
         table = {(MY, "is_company"): [usage(MY, 19, "is_company", ["res.partner"], "string")]}
         res = self.refs(Target(FIELD, model="res.partner", name="is_company"), rel=PARTNER, usages=table)
         decl = spot(PARTNER, 17, "is_company")
-        view = spot("odoo/odoo/addons/base/views/res_partner_views.xml", 9, "is_company")  # invisible="is_company"
+        view = spot("odoo/odoo/addons/base/views/res_partner_views.xml", 9, "is_company")
         domain = spot(MY, 19, "is_company")
-        record = spot(COMPANY_DATA, 6, "is_company")  # <field name="is_company" eval="True"/>
-        # current file, then customer modules (custom/ is a customer addons root), then core;
-        # data records rank after code
+        record = spot(COMPANY_DATA, 6, "is_company")
+        # current file, customer modules (custom/), core; data records after code
         self.assertEqual(res, [decl, domain, view, record])
 
     def test_record_fields_filtered_by_record_model(self):
         res = self.refs(Target(FIELD, model="res.company", name="partner_id"), rel=COMPANY)
-        self.assertIn(spot(COMPANY_DATA, 10, "partner_id"), res)  # record model="res.company"
-        self.assertIn(spot(COMPANY, 8, "partner_id"), res)  # related='partner_id.name'
+        self.assertIn(spot(COMPANY_DATA, 10, "partner_id"), res)
+        self.assertIn(spot(COMPANY, 8, "partner_id"), res)
         self.assertNotIn(spot(SALE_VIEWS, 11, "partner_id"), res)
         res = self.refs(Target(FIELD, model="sale.order", name="partner_id"))
         self.assertNotIn(spot(COMPANY_DATA, 10, "partner_id"), res)
 
     def test_family(self):
         search = R._Search(self.ctx(SALE), True, R.MAX_REFERENCES)
-        # res.users delegates the partner fields it does not define (_inherits)
         self.assertEqual(search.family(["res.partner"], "email", "field"), {"res.partner", "res.users"})
         self.assertEqual(search.family(["res.users"], "email", "field"), {"res.partner", "res.users"})
         self.assertEqual(search.family(["res.users"], "login", "field"), {"res.users"})
-        self.assertEqual(search.family(["res.partner"], "_get_country_code", "method"), {"res.partner"})  # methods are not delegated
-        # mixins having the member, models inheriting the target, base for framework members
+        # _inherits delegates fields, not methods
+        self.assertEqual(search.family(["res.partner"], "_get_country_code", "method"), {"res.partner"})
         self.assertEqual(search.family(["sale.order"], "message_ids", "field"), {"sale.order", "mail.thread"})
         self.assertEqual(search.family(["mail.thread"], "message_post", "method"), {"mail.thread", "sale.order", "product.product"})
         self.assertIn("base", search.family(["sale.order"], "write", "method"))
@@ -213,7 +201,7 @@ class FieldReferencesTest(_FixtureCase):
         line, col = spot(SALE_VIEWS, 11, "partner_id")[1:]
         with mock.patch.object(R, "_usage_finder", lambda: FakeUsages()):
             res = rel_spots(R.references(self.ctx(SALE_VIEWS, line, col + 2), True))
-        self.assertEqual(res[0], spot(SALE_VIEWS, 11, "partner_id"))  # current file first
+        self.assertEqual(res[0], spot(SALE_VIEWS, 11, "partner_id"))
         self.assertIn(spot(SALE, 12, "partner_id"), res)
         self.assertIn(spot(MY_VIEWS, 8, "partner_id"), res)
 
@@ -231,18 +219,18 @@ class MethodReferencesTest(_FixtureCase):
             spot(SALE_STOCK, 10, "action_confirm"),
             spot(SUBSCRIPTION, 17, "action_confirm"),
             spot(MY, 17, "action_confirm"),
-            spot(SALE_VIEWS, 9, "action_confirm"),  # <button name="action_confirm" type="object">
-            spot(SALE_STOCK, 11, "action_confirm"),  # super() calls
+            spot(SALE_VIEWS, 9, "action_confirm"),
+            spot(SALE_STOCK, 11, "action_confirm"),
             spot(SUBSCRIPTION, 18, "action_confirm"),
             spot(MY, 23, "action_confirm"),
         ]
-        self.assertEqual(sorted(res), sorted(expected))  # the "string" usage kind is not a method use
+        self.assertEqual(sorted(res), sorted(expected))
         res = self.refs(Target(METHOD, model="sale.order", name="action_confirm"), include=False, usages=table)
         self.assertEqual(sorted(res), sorted(expected[4:]))
 
     def test_compute_string(self):
         res = self.refs(Target(METHOD, model="sale.order", name="_compute_amounts"))
-        self.assertIn(spot(SALE, 16, "_compute_amounts"), res)  # compute='_compute_amounts'
+        self.assertIn(spot(SALE, 16, "_compute_amounts"), res)
         self.assertIn(spot(SALE, 21, "_compute_amounts"), res)
 
     def test_receiver_filter(self):
@@ -253,17 +241,17 @@ class MethodReferencesTest(_FixtureCase):
             table = {(SALE, name): [usage(SALE, 30, name, receivers, "call")]}
             return here in self.refs(Target(METHOD, model=target_model, name=name), usages=table)
 
-        self.assertTrue(found("mail.thread", ["sale.order"]))  # a model inheriting the mixin
-        self.assertTrue(found("sale.order", ["mail.thread"]))  # the mixin defining the method
-        self.assertTrue(found("sale.order", ["res.users", "sale.order"]))  # ambiguous receiver, one matches
-        self.assertFalse(found("sale.order", ["product.product"]))  # sibling: another model's method
-        self.assertFalse(found("mail.thread", ["res.partner"]))  # not a thread model in the fixture
+        self.assertTrue(found("mail.thread", ["sale.order"]))
+        self.assertTrue(found("sale.order", ["mail.thread"]))
+        self.assertTrue(found("sale.order", ["res.users", "sale.order"]))
+        self.assertFalse(found("sale.order", ["product.product"]))
+        self.assertFalse(found("mail.thread", ["res.partner"]))
 
     def test_class_attribute(self):
         finder = FakeUsages({(SALE, "_description"): [usage(SALE, 8, "_description", ["sale.order"], "attr")]})
         res = self.refs(Target(ATTR, model="sale.order", name="_description"), finder=finder)
-        self.assertIn(spot(SALE, 8, "_description"), res)  # the model's own value
-        self.assertIn(spot("odoo/addons/mail/models/mail_thread.py", 6, "_description"), res)  # the mixin's, overridden
+        self.assertIn(spot(SALE, 8, "_description"), res)
+        self.assertIn(spot("odoo/addons/mail/models/mail_thread.py", 6, "_description"), res)
         self.assertIn((fx(SALE), "_description"), finder.calls)
 
     def test_time_box_keeps_index_results(self):
@@ -272,27 +260,27 @@ class MethodReferencesTest(_FixtureCase):
             res = self.refs(Target(METHOD, model="sale.order", name="action_confirm"), finder=finder)
         self.assertIn(spot(SALE_VIEWS, 9, "action_confirm"), res)
         self.assertIn(spot(MY, 17, "action_confirm"), res)
-        self.assertLessEqual({p for p, _ in finder.calls}, {fx(SALE)})  # only the current file got analysed
+        self.assertLessEqual({p for p, _ in finder.calls}, {fx(SALE)})
 
 
 class OtherReferencesTest(_FixtureCase):
     def test_model(self):
         res = self.refs(Target(MODEL, model="res.partner"), rel=PARTNER)
         expected = [
-            spot(PARTNER, 4, "Partner"),  # class declaration
-            spot(PARTNER, 5, "res.partner"),  # _name
-            spot(PARTNER, 12, "res.partner"),  # comodel
-            spot(SALE, 43, "res.partner"),  # env['res.partner']
+            spot(PARTNER, 4, "Partner"),
+            spot(PARTNER, 5, "res.partner"),
+            spot(PARTNER, 12, "res.partner"),
+            spot(SALE, 43, "res.partner"),
             spot(MY, 19, "res.partner"),
             spot("odoo/odoo/addons/base/security/ir.model.access.csv", 2, "model_res_partner"),
-            spot("odoo/odoo/addons/base/views/res_partner_views.xml", 5, "res.partner"),  # <field name="model">
-            spot("odoo/odoo/addons/base/views/res_partner_views.xml", 22, "res.partner"),  # res_model
-            spot("odoo/odoo/addons/base/models/res_users.py", 15, "res.partner"),  # _inherits
+            spot("odoo/odoo/addons/base/views/res_partner_views.xml", 5, "res.partner"),
+            spot("odoo/odoo/addons/base/views/res_partner_views.xml", 22, "res.partner"),
+            spot("odoo/odoo/addons/base/models/res_users.py", 15, "res.partner"),
         ]
         for s in expected:
             self.assertIn(s, res)
         self.assertEqual(res[0][0], PARTNER)
-        record = spot(COMPANY_DATA, 4, "res.partner")  # <record model="res.partner"> of a data file
+        record = spot(COMPANY_DATA, 4, "res.partner")
         self.assertEqual(res[-1], record)
 
     def test_xmlid(self):
@@ -304,7 +292,7 @@ class OtherReferencesTest(_FixtureCase):
 
     def test_module(self):
         res = self.refs(Target(MODULE, name="sale"))
-        self.assertEqual(res[0], spot("custom/my_module/__manifest__.py", 4, "sale"))  # customer modules first
+        self.assertEqual(res[0], spot("custom/my_module/__manifest__.py", 4, "sale"))
         self.assertIn(("odoo/addons/sale/__manifest__.py", 0, 0), res)
         for rel in ("custom/my_module/__manifest__.py", "odoo/addons/sale_stock/__manifest__.py", "enterprise/sale_subscription/__manifest__.py"):
             self.assertIn(spot(rel, 4, "sale"), res)
@@ -321,10 +309,10 @@ class OtherReferencesTest(_FixtureCase):
             finally:
                 self.reg.remove_file(path)
         spots = [(uri_to_path(loc["uri"]), loc["range"]["start"]["line"], loc["range"]["start"]["character"], loc["range"]["end"]["character"]) for loc in res]
-        self.assertIn((path, 0, 17, 21), spots)  # odoo.addons.<sale>.models...
-        self.assertIn((path, 1, 24, 28), spots)  # from odoo.addons import <sale>
+        self.assertIn((path, 0, 17, 21), spots)
+        self.assertIn((path, 1, 24, 28), spots)
         self.assertNotIn(1, [s[1] for s in spots if s[0] == path and s[2] == 0])
-        self.assertEqual(len([s for s in spots if s[0] == path]), 2)  # sale_stock is another module
+        self.assertEqual(len([s for s in spots if s[0] == path]), 2)
 
     def test_pysym_function_through_reexport(self):
         line, col = spot(FLOAT_UTILS, 5, "float_compare")[1:]
@@ -334,7 +322,7 @@ class OtherReferencesTest(_FixtureCase):
             sorted(res),
             sorted([spot(FLOAT_UTILS, 5, "float_compare"), spot(TOOLS_INIT, 1, "float_compare"), spot(SALE, 2, "float_compare"), spot(SALE, 28, "float_compare")]),
         )
-        self.assertEqual(res[0][0], SALE)  # current file first
+        self.assertEqual(res[0][0], SALE)
         self.assertNotIn(spot(FLOAT_UTILS, 5, "float_compare"), self.refs(target, include=False))
 
     def test_pysym_local_variable(self):
@@ -352,7 +340,7 @@ class OtherReferencesTest(_FixtureCase):
         from odoo_lens import features
 
         line, col = spot(SALE_VIEWS, 11, "partner_id")[1:]
-        for _ in range(2):  # importing the submodule rebinds the package attribute to it
+        for _ in range(2):  # the first submodule import would rebind the package attribute
             res = rel_spots(features.references(self.ctx(SALE_VIEWS, line, col), True))
             self.assertIn(spot(SALE, 12, "partner_id"), res)
 
@@ -372,8 +360,6 @@ class OtherReferencesTest(_FixtureCase):
 
 
 class LiveUsagesTest(_FixtureCase):
-    """With the real analysis.python.member_usages (skipped until it exists)."""
-
     def setUp(self):
         super().setUp()
         if R._usage_finder() is None:
@@ -383,7 +369,7 @@ class LiveUsagesTest(_FixtureCase):
         res = rel_spots(R.references_for_target(self.ctx(SALE), Target(FIELD, model="sale.order", name="partner_id"), True))
         self.assertIn(spot(SALE, 30, "partner_id"), res)
         self.assertIn(spot(MY, 15, "partner_id"), res)
-        self.assertNotIn(spot(MY, 21, "partner_id"), res)  # company.partner_id
+        self.assertNotIn(spot(MY, 21, "partner_id"), res)
 
     def test_action_confirm_super_calls(self):
         res = rel_spots(R.references_for_target(self.ctx(SALE), Target(METHOD, model="sale.order", name="action_confirm"), True))
@@ -391,13 +377,9 @@ class LiveUsagesTest(_FixtureCase):
             self.assertIn(s, res)
 
 
-# ---------------------------------------------------------------------------
-# real checkouts
-
-
 class _RealTree:
     VERSION = ""
-    BUDGET = 3.5  # seconds (server budget: < 3 s on a quiet machine)
+    BUDGET = 3.5  # seconds
 
     @classmethod
     def setUpClass(cls):
@@ -434,7 +416,6 @@ class _RealTree:
         texts = self.texts(res)
         self.assertLess(dt, 0.5)
         self.assertLessEqual(len(res), R.MAX_REFERENCES)
-        # model names, implicit xml ids model_sale_order, class names of the declarations
         self.assertTrue(all(t == "sale.order" or t.endswith("model_sale_order") or t.isidentifier() for _, _, t in texts), texts[:20])
         self.assertTrue(any(p == "odoo/addons/sale/models/sale_order.py" and t == "sale.order" for p, _, t in texts))
         res, dt = self.run_refs(Target(XMLID, xmlid="base.main_company"))
@@ -475,8 +456,8 @@ class _RealTree:
         self.assertLess(dt, 0.5)
         self.assertEqual({t for _, _, t in texts}, {"web.FormView"})
         files = {p for p, _, _ in texts}
-        self.assertIn("odoo/addons/web/static/src/views/form/form_controller.xml", files)  # t-name
-        self.assertTrue(any(p.endswith(".js") for p in files), files)  # static template = "web.FormView"
+        self.assertIn("odoo/addons/web/static/src/views/form/form_controller.xml", files)
+        self.assertTrue(any(p.endswith(".js") for p in files), files)
 
 
 class RealTree16Test(_RealTree, unittest.TestCase):

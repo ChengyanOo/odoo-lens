@@ -1,31 +1,3 @@
-"""Find references (``textDocument/references``).
-
-The target under the cursor (``analysis.targets_at``, first target) is turned
-into reference locations by :func:`references_for_target`, which also works on
-hand-built targets. Sources, cheapest first:
-
-* the registry's inverted index: model names, xml ids, templates, manifest
-  ``depends``, and field paths / method names held by known string contexts
-  (``related=``, ``@api.depends``, ``compute=``, view arch, buttons, JS
-  ``orm.call``...). A field ref counts when the path segment naming the field
-  is owned by the target model or a model related to it by inheritance;
-* on-demand scans of candidate files the index cannot answer: XML record-level
-  ``<field name>`` elements (re-extracted in full), CSV headers, Python
-  attribute / call / string usages whose receiver model is inferred
-  (``analysis.python.member_usages``), imports for modules and generic Python
-  symbols, JS imports (and the local names they bind) for JS symbols.
-
-Scans only visit modules that can see the target, prefilter file contents with
-byte searches, run in relevance order (current file, customer modules, then
-core files most likely to type a receiver as the target model; Python files
-never loaded - migrations, upgrade scripts - last) and stop at a time box, or
-as soon as the hits found fill the capped answer several times over. Results
-are deduplicated, ranked - current file, never-loaded Python files last,
-customer modules (``env.custom_roots``), primary before secondary references
-(data records' ``<field name>`` and ``model=``, CSV headers, anything in test
-files), module load order, path/line - and capped.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -98,16 +70,16 @@ from .navigation import class_spot, descendants, field_implementations, member_s
 log = logging.getLogger("odoo_lens.references")
 
 MAX_REFERENCES = 300
-MAX_PY_REFERENCES = 100  # generic Python symbols / files: name-based, keep it short
-MAX_MODELS = 3  # ambiguous member targets: union over the best candidate models
-BUDGET = float(os.environ.get("ODOO_LENS_REFS_BUDGET", "2.2"))  # seconds of scanning per request (one file may overrun it by ~0.3 s)
-CORE_PY_SHARE = 0.7  # share of the budget core Python scans may use before XML records get their turn
+MAX_PY_REFERENCES = 100
+MAX_MODELS = 3
+BUDGET = float(os.environ.get("ODOO_LENS_REFS_BUDGET", "2.2"))  # seconds of scanning per request
+CORE_PY_SHARE = 0.7
 MAX_ARCH_CANDIDATES = 3
 SOURCE_CACHE_BYTES = 32 << 20
 USAGE_CACHE_SIZE = 50_000
 REEXPORT_DEPTH = 2
-SATURATION = 2  # scans stop once primary hits fill the capped answer this many times over
-PRIMARY, SECONDARY = 0, 1  # ranking tiers within a file group (test files are always secondary)
+SATURATION = 2
+PRIMARY, SECONDARY = 0, 1
 
 _WHICH = {FIELD: "field", METHOD: "method", ATTR: "attr"}
 _USAGE_KINDS = {
@@ -119,20 +91,15 @@ _UNLOADED = tuple(f"{os.sep}{d}{os.sep}" for d in sorted(UNLOADED_DIRS - {"tests
 _TESTS = f"{os.sep}tests{os.sep}"
 _IDENT = re.compile(rb"[A-Za-z_]\w*")
 _QUOTED_MODEL = re.compile(rb"""['"]([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)['"]""")
-_MANY_NEEDLES = 16  # above this many needles, one identifier/regex pass beats repeated bytes.find
-# strings and comments of Python source (best effort: prefixes, triple quotes, escapes)
+_MANY_NEEDLES = 16  # above this, one regex pass beats repeated bytes.find
 _PY_SKIP = re.compile(r'''#[^\n]*|[rRbBuUfF]{0,2}(?:"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')''')
-# strings, template literals and comments of JS source (best effort: no regex literals)
+# JS strings, template literals and comments (best effort: no regex literals)
 _JS_SKIP = re.compile(r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\[\s\S]|[^`\\])*`''')
 _JS_IDENT = re.compile(r"[A-Za-z_$][\w$]*")
 _JS_STAR_EXPORT = re.compile(r"""\bexport\s*\*\s*from\s*(["'])([^"'\n]+)\1""")
 _JS_STAR_EXPORT_B = re.compile(rb"""\bexport\s*\*\s*from\b""")  # byte prefilter: such barrels need not name the symbol
 _JS_EXPORT_LIST = re.compile(r"""\bexport\s*\{([^}]*)\}(\s*from\b)?""")
 _JS_EXPORT_DEFAULT = re.compile(r"""\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?\s*$""", re.M)
-
-
-# ---------------------------------------------------------------------------
-# entry points
 
 
 def references(ctx: Any, include_declaration: bool = True) -> list[dict]:
@@ -177,7 +144,6 @@ def _target_models(target: Target) -> list[str]:
 
 
 def _usage_finder() -> Callable | None:
-    """``analysis.python.member_usages`` (None while that analysis is unavailable)."""
     try:
         from ..analysis.python import member_usages
     except ImportError:
@@ -185,13 +151,7 @@ def _usage_finder() -> Callable | None:
     return member_usages
 
 
-# ---------------------------------------------------------------------------
-# per-registry lookup tables
-
-
 class _Index:
-    """Tables derived from one registry generation, built on first use."""
-
     __slots__ = ("generation", "custom_prefixes", "custom_modules", "_files", "_links", "_imports", "usages")
 
     def __init__(self, reg: Any, env: Any):
@@ -202,10 +162,10 @@ class _Index:
         self._files: dict | None = None
         self._links: tuple | None = None
         self._imports: dict | None = None
-        self.usages: dict = {}  # (path, name, stamp) -> member_usages result
+        self.usages: dict = {}
 
     def files(self, reg: Any, env: Any) -> dict[str | None, list[tuple[str, str, bool, bool, int]]]:
-        """module -> [(path, kind, is test file, never loaded, module rank)]."""
+        # module -> [(path, kind, is_test, never_loaded, rank)]; scan/_entry_order index into it
         if self._files is None:
             out: dict = defaultdict(list)
             for path, facts in reg.files.items():
@@ -219,8 +179,6 @@ class _Index:
         return self._files
 
     def links(self, reg: Any) -> tuple[dict[str, set[bytes]], dict[str, set[str]]]:
-        """(comodel -> names of relational fields pointing to it,
-        parent -> models delegating to it through ``_inherits``)."""
         if self._links is None:
             links: dict[str, set[bytes]] = defaultdict(set)
             delegating: dict[str, set[str]] = defaultdict(set)
@@ -238,8 +196,6 @@ class _Index:
         return self._links
 
     def imports(self, reg: Any) -> dict[str, list[tuple[str, tuple]]]:
-        """Resolved dotted module -> [(importing file, Import tuple)] (relative
-        imports resolved against the importing file's package)."""
         if self._imports is None:
             out: dict[str, list[tuple[str, tuple]]] = defaultdict(list)
             for path, facts in reg.iter_files(KIND_PY):
@@ -272,8 +228,6 @@ def _index(reg: Any, env: Any) -> _Index:
 
 
 class _Sources:
-    """Bounded LRU of file contents validated by (mtime_ns, size)."""
-
     def __init__(self, budget: int):
         self._data: OrderedDict[str, tuple[tuple[int, int], bytes]] = OrderedDict()
         self._size = 0
@@ -307,13 +261,7 @@ class _Sources:
 _SOURCES = _Sources(SOURCE_CACHE_BYTES)
 
 
-# ---------------------------------------------------------------------------
-# the search
-
-
 class _Search:
-    """Reference locations of one request: deduplicated, then ranked and capped."""
-
     def __init__(self, ctx: Any, include_declaration: bool, cap: int):
         self.ctx = ctx
         self.reg = ctx.registry
@@ -322,15 +270,13 @@ class _Search:
         self.index = _index(ctx.registry, ctx.env)
         self.started = time.monotonic()
         self.deadline = self.started + BUDGET
-        self.stopped = ""  # why scanning stopped early ("time box" / "saturated")
-        self.hits: dict[tuple[str, int, int], tuple[int, int]] = {}  # (path, line, col) -> (end_col, tier)
+        self.stopped = ""
+        self.hits: dict[tuple[str, int, int], tuple[int, int]] = {}
         self.primary = 0
         self._file_keys: dict[str, tuple] = {}
         self._code: dict[str, _PyCode | None] = {}
 
     def add(self, path: str, line: int, col: int, end_col: int, tier: int = PRIMARY) -> None:
-        """Record a location; ``tier`` SECONDARY ranks it after the primary
-        references (data records, CSV headers)."""
         key = (path, line, col)
         hit = self.hits.get(key)
         if hit is None or tier < hit[1]:
@@ -339,11 +285,8 @@ class _Search:
             self.hits[key] = (end_col, tier)
 
     def should_stop(self, deadline: float | None = None) -> bool:
-        """Raises when the request is cancelled; True once the time box (or the
-        earlier ``deadline`` of a phase) is reached, or when the primary hits
-        found fill the capped answer several times over - files scanned later
-        rank lower or only add secondary hits."""
         self.ctx.token.check()
+        # saturated: files scanned later rank lower or only add secondary hits
         if self.primary >= SATURATION * self.cap:
             self.stopped = "saturated"
             return True
@@ -354,7 +297,7 @@ class _Search:
         return deadline is not None and now > deadline
 
     def source(self, path: str) -> tuple[bytes | None, tuple[int, int] | None]:
-        """Current content of ``path`` and its disk stamp (None for unsaved text)."""
+        # stamp None: editor buffer text (current or open file), never cached
         if path == self.ctx.path:
             return self.ctx.source, None
         docs = self.ctx.server.documents
@@ -363,7 +306,6 @@ class _Search:
         return _SOURCES.get(path)
 
     def code(self, path: str) -> _PyCode | None:
-        """Text of a Python or JS file with its strings and comments located."""
         if path not in self._code:
             src = self.source(path)[0]
             js = path.endswith(".js")
@@ -371,9 +313,7 @@ class _Search:
         return self._code[path]
 
     def file_key(self, path: str) -> tuple:
-        """Ranking of a file: current file, Python files never loaded
-        (migrations...) last, customer modules, non-test files, load order of
-        the module, path."""
+        # (not current, unloaded .py, not customer, test, rank, path): sort_key indexes into it
         key = self._file_keys.get(path)
         if key is None:
             reg = self.reg
@@ -404,8 +344,6 @@ class _Search:
             )
         return [self.ctx.location(path, line, col, end) for (path, line, col), (end, _tier) in items[:cap]]
 
-    # ------------------------------------------------------------- simple kinds
-
     def model(self, model: str) -> None:
         reg = self.reg
         if self.include_declaration:
@@ -431,7 +369,6 @@ class _Search:
             self.add(h.path, h.line, h.col, h.end_col)
 
     def module(self, name: str) -> None:
-        """Manifest ``depends`` entries and absolute ``odoo.addons.<name>`` imports."""
         reg = self.reg
         info = reg.module(name)
         if self.include_declaration and info is not None:
@@ -451,8 +388,7 @@ class _Search:
                         self.add(*self._spot_near(path, imp, rx))
 
     def _spot_near(self, path: str, imp: tuple, rx: re.Pattern) -> tuple[str, int, int, int]:
-        """Position of ``rx``'s group 1 on the import's line or the lines above it
-        (``from x import (\\n  name)``), else the imported name token."""
+        # import facts point at the name; the module may be on a line above ("from x import (")
         lines = self.ctx.server.documents.lines(path) or []
         for n in range(min(imp[I_LINE], len(lines) - 1), max(-1, imp[I_LINE] - 8), -1):
             m = rx.search(lines[n])
@@ -460,8 +396,6 @@ class _Search:
                 line = lines[n]
                 return (path, n, utf16_len(line[: m.start(1)]), utf16_len(line[: m.end(1)]))
         return (path, imp[I_LINE], imp[I_COL], imp[I_END_COL])
-
-    # ------------------------------------------------------------ fields / methods
 
     def member(self, which: str, models: list[str], name: str) -> None:
         reg = self.reg
@@ -471,7 +405,7 @@ class _Search:
             for model in models:
                 for d in _declarations(reg, model, name, which):
                     self.add(*member_spot(d))
-        unresolved: set[str] = set()  # Python files holding model-less string refs to ``name``
+        unresolved: set[str] = set()
         if which != "attr":
             self.string_refs(REF_FIELD if which == "field" else REF_METHOD, name, in_family, unresolved)
         modules = self.visible_modules(models, name, which)
@@ -480,10 +414,7 @@ class _Search:
         self.scan(which, name, family, in_family, modules, unresolved)
 
     def family(self, models: list[str], name: str, which: str) -> set[str] | None:
-        """Models whose member ``name`` is the target's: the targets, their
-        ancestors that have the member, models inheriting them and - for fields -
-        models delegating to them via ``_inherits`` without redefining the field.
-        None means every model (members of ``base``)."""
+        # None: a target model is base, so every model is in the family
         reg = self.reg
         if "base" in models:
             return None
@@ -497,7 +428,7 @@ class _Search:
                 parents = list(reg.model_parents(m))
                 if which == "field":
                     defs = reg.field(m, name)
-                    if defs and defs[0].delegated_via:  # delegated: the _inherits parent owns it
+                    if defs and defs[0].delegated_via:
                         parents += [p for p, via in reg.model_inherits(m).items() if via == defs[0].delegated_via]
                 for p in parents:
                     if p not in seen:
@@ -515,9 +446,6 @@ class _Search:
         return fam
 
     def visible_modules(self, models: list[str], name: str, which: str) -> set[str] | None:
-        """Modules that can see the member: those defining it on the target
-        models (or their ancestors) and their dependents. None: every module and
-        the framework (member defined by the framework)."""
         reg = self.reg
         lookup = _lookup(reg, which)
         mods: set[str | None] = set()
@@ -536,7 +464,6 @@ class _Search:
         return out
 
     def string_refs(self, kind: str, name: str, in_family: Callable[[Any], bool], unresolved: set[str]) -> None:
-        """Indexed field paths / method names whose owner is in the family."""
         reg = self.reg
         for h in reg.refs_by_name(kind, name):
             rctx = h.ctx
@@ -544,7 +471,7 @@ class _Search:
                 if self._arch_ref_matches(h, in_family):
                     self.add(h.path, h.line, h.col, h.end_col)
                 continue
-            if rctx[0] in MODEL_ROLES:  # record rule / action domains, cron code, view domains
+            if rctx[0] in MODEL_ROLES:
                 facts = reg.file_facts(h.path) or {}
                 root = arch_ref_model(reg, h.path, facts, h.facts, self.ctx.source if h.path == self.ctx.path else None)
                 if root is None:
@@ -581,8 +508,7 @@ class _Search:
         return 0 < len(cands) <= MAX_ARCH_CANDIDATES and any(in_family(m) for m in cands)
 
     def _add_segment(self, path: str, ref: tuple, offset: int, length: int) -> None:
-        """The range of one segment of a path string (whole string when escapes
-        or wide characters make the offsets unreliable)."""
+        # whole string when escapes or wide characters make the offsets unreliable
         col, end = ref[R_COL], ref[R_END_COL]
         if end - col == len(ref[R_VALUE]):
             self.add(path, ref[R_LINE], col + offset, col + offset + length)
@@ -609,14 +535,7 @@ class _Search:
     def _module_visible(self, mod: str | None, modules: set[str] | None) -> bool:
         return modules is None or mod in modules or mod in self.index.custom_modules
 
-    # ---------------------------------------------------------------- file scans
-
     def scan(self, which: str, name: str, family: set[str] | None, in_family: Callable[[Any], bool], modules: set[str] | None, unresolved: set[str]) -> None:
-        """Python usages and XML record fields, most relevant files first:
-        current file, customer modules, then core files grouped by how likely
-        they type a receiver as a family model (their classes, the model name
-        quoted, a relational field pointing to it); tests, then Python files
-        never loaded (migrations...), last."""
         reg, ctx = self.reg, self.ctx
         finder = _usage_finder()
         if finder is None:
@@ -631,7 +550,7 @@ class _Search:
         core_py: list[tuple] = []
         custom_xml: list[tuple] = []
         core_xml: list[tuple] = []
-        unloaded_py: list[str] = []  # migrations / upgrade scripts: scanned (and ranked) last
+        unloaded_py: list[str] = []  # migrations / upgrades: scanned and ranked last, like incomingCalls
         for mod, entries in self.index.files(reg, ctx.env).items():
             if not self._module_visible(mod, modules):
                 continue
@@ -675,8 +594,7 @@ class _Search:
             pyscan.scan(path)
 
     def xml_records(self, paths: list[str], name: str, in_family: Callable[[Any], bool]) -> None:
-        """Record-level ``<field name="name">`` of records whose model is in the
-        family (not in the index: candidate files are re-extracted in full)."""
+        # record-level <field name> refs are not indexed: candidate files are re-extracted
         reg = self.reg
         nb = name.encode()
         needles = (b'name="' + nb + b'"', b"name='" + nb + b"'")
@@ -699,13 +617,7 @@ class _Search:
                     if rctx[0] == "record" and 0 <= rctx[1] < len(recs) and in_family(recs[rctx[1]][X_MODEL]):
                         self.add(path, ref[R_LINE], ref[R_COL], ref[R_END_COL], SECONDARY)
 
-    # ------------------------------------------------------- generic Python / files
-
     def pysym(self, target: Target) -> None:
-        """Name-based references of a Python symbol: occurrences in its scope
-        (function for locals), plus in the files importing it (following package
-        re-exports) for module-level symbols and members of plain classes. JS
-        symbols (a ``.js`` path) go to :meth:`jssym`."""
         path, name = target.path, target.name
         if not path or not name:
             return
@@ -716,7 +628,7 @@ class _Search:
             facts = self.ctx.facts if path == self.ctx.path else self.reg.file_facts(path)
             scope, lo, hi, owner = _py_scope(facts or {}, target.line, name)
             dotted = self.reg.py_dotted_name(path)
-            uses: dict[str, set[re.Pattern]] = defaultdict(set)  # importing file -> patterns
+            uses: dict[str, set[re.Pattern]] = defaultdict(set)
             if scope == "local":
                 self.scan_code(path, code, _bare_rx(name), lo, hi)
             elif scope == "member":
@@ -736,13 +648,8 @@ class _Search:
             self.hits.pop((path, target.line, target.col), None)
 
     def jssym(self, target: Target, code: _PyCode | None) -> None:
-        """Name-based references of a JS symbol: occurrences in its file, then
-        in the JS modules importing it (named, renamed, default and namespace
-        imports, following ``export ... from`` re-exports), under the local
-        name each of them binds it to."""
         path, name = target.path or "", target.name or ""
-        # the import under the cursor (the name it binds here, ``ns.name`` for a
-        # namespace): scanned first, however long the re-export chain to ``path``
+        # cursor's own import is scanned first: found even past REEXPORT_DEPTH
         here = target.extra.get("local") if self.ctx.path != path and self.ctx.path.endswith(".js") else None
         if here:
             ns, _, member = here.rpartition(".")
@@ -755,13 +662,12 @@ class _Search:
             if local:
                 self.scan_code(path, code, _js_bare_rx(local))
                 exported_as = _js_exported_as(code, target.line, local)
-        # ``name`` is the name the importer used: through ``export {a as b} from``
-        # re-exports it differs from the names the defining module exports
+        # name is the importer's: via export {a as b} from, it differs from what the module exports
         todo = [(path, n) for n in dict.fromkeys([*exported_as, name])]
         seen = set(todo)
-        importers: dict[str, tuple[set[str], list[str]]] = {}  # module -> (its specifiers, JS files importing it)
+        importers: dict[str, tuple[set[str], list[str]]] = {}
         for _depth in range(REEXPORT_DEPTH + 1):
-            wanted: dict[str, list[tuple[str, str, set[str]]]] = defaultdict(list)  # importer -> [(module, name, its specifiers)]
+            wanted: dict[str, list[tuple[str, str, set[str]]]] = defaultdict(list)
             for mod_path, exported in todo:
                 if mod_path not in importers:
                     specs = _js_specs(self.reg, mod_path)
@@ -800,7 +706,6 @@ class _Search:
             seen.update(todo)
 
     def js_importers(self, path: str, specs: set[str]) -> list[str]:
-        """JS files with an import / re-export specifier resolving to ``path``."""
         out: list[str] = []
         for jpath, facts in self.reg.iter_files(KIND_JS):
             if any(_js_spec_matches(jpath, spec, path, specs) for spec, _line, _col, _end in facts.get(IMPORTS) or ()):
@@ -808,13 +713,10 @@ class _Search:
         return out
 
     def full_before(self, path: str) -> bool:
-        """The capped answer is full of hits ranking before ``path``'s."""
         key = self.file_key(path)
         return sum(1 for p, _line, _col in self.hits if self.file_key(p) < key) >= self.cap
 
     def scan_importers(self, uses: dict[str, set[re.Pattern]]) -> None:
-        """Scan importing files in ranking order; stop once the capped answer
-        is full of hits ranking before the next file."""
         for path in sorted(uses, key=self.file_key):
             if self.should_stop() or self.full_before(path):
                 return
@@ -823,9 +725,6 @@ class _Search:
                 self.scan_code(path, code, rx)  # type: ignore[arg-type]
 
     def importers(self, dotted: str, name: str) -> list[tuple[str, str, str]]:
-        """Files importing ``name`` from module ``dotted``, as (path, mode, alias):
-        mode "name" (used bare as ``alias``) or "module" (used as ``alias.name``).
-        Re-exports through package ``__init__`` files are followed."""
         imports = self.index.imports(self.reg)
         out: list[tuple[str, str, str]] = []
         seen: set[tuple[str, str]] = set()
@@ -844,17 +743,16 @@ class _Search:
                         package = self.reg.py_dotted_name(path)
                         if package and package != mod:
                             todo.append((package, alias, depth + 1))
-                elif imported is None and imp[I_MODULE] == mod:  # import a.b.c [as x]
+                elif imported is None and imp[I_MODULE] == mod:
                     out.append((path, "module", imp[I_ASNAME] or mod))
             parent, _, last = mod.rpartition(".")
             for path, imp in imports.get(parent, ()) if parent else ():
-                if imp[I_NAME] == last:  # from package import module [as x]
+                if imp[I_NAME] == last:
                     out.append((path, "module", imp[I_ASNAME] or last))
         return out
 
     def scan_code(self, path: str, code: _PyCode, rx: re.Pattern, lo: int | None = None, hi: int | None = None) -> None:
-        """Matches of ``rx``'s group 1 outside strings and comments (between
-        lines ``lo`` and ``hi`` when given), skipping ``name=`` keyword arguments."""
+        # skips strings, comments and Python name= keyword arguments (not uses)
         text = code.text
         start = code.offset(lo) if lo is not None else 0
         end = code.offset(hi + 1) if hi is not None else len(text)
@@ -865,7 +763,6 @@ class _Search:
             self.add(path, *code.position(s, e))
 
     def file(self, path: str) -> None:
-        """Imports of a Python module, JS imports of a JS module, manifest entries."""
         reg = self.reg
         if self.include_declaration:
             self.add(path, 0, 0, 0)
@@ -882,9 +779,9 @@ class _Search:
         parent, _, last = dotted.rpartition(".")
         rx = re.compile(r"(?<![\w])(" + re.escape(last) + r")\b")
         for path, imp in imports.get(dotted, ()):
-            if imp[I_NAME] is None:  # import a.b.c
+            if imp[I_NAME] is None:
                 self.add(path, imp[I_LINE], imp[I_COL], imp[I_COL] + len(imp[I_MODULE]))
-            else:  # from a.b.c import x: point at the module part of the statement
+            else:
                 self.add(*self._spot_near(path, imp, rx))
         for path, imp in imports.get(parent, ()) if parent else ():
             if imp[I_NAME] == last:
@@ -919,25 +816,18 @@ class _Search:
                     self.add(mpath, ref[R_LINE], ref[R_COL], ref[R_END_COL])
 
 
-# ---------------------------------------------------------------------------
-# Python usages of a member
-
-
 class _PyScan:
-    """member_usages over candidate Python files, filtered by receiver model."""
-
     def __init__(self, search: _Search, finder: Callable | None, name: str, which: str, in_family: Callable[[Any], bool], accept_unknown: bool):
         self.search = search
         self.finder = finder
         self.name = name
         self.kinds = _USAGE_KINDS[which]
         self.in_family = in_family
-        self.accept_unknown = accept_unknown  # receiver unknown: count only for (nearly) unique names
+        self.accept_unknown = accept_unknown
         nb = re.escape(name.encode())
-        # the name as a whole word (attribute, path segment, dict key, order item) or
-        # after "default_" (context keys); the literal comes first for a fast search
+        # whole word, or after "default_" (context keys); literal first for a fast search
         self.pattern = re.compile(nb + rb"\b(?:(?<!\w" + nb + rb")|(?<=default_" + nb + rb"))")
-        self.leftovers: list[str] = []  # candidates with no hint of the family (unknown receivers only)
+        self.leftovers: list[str] = []
         self.failures = 0
 
     def scan(self, path: str) -> None:
@@ -951,7 +841,7 @@ class _PyScan:
         if usages is None:
             try:
                 usages = self.finder(search.reg, path, src, self.name)  # type: ignore[misc]
-            except Exception:  # one unanalysable file must not sink the whole search
+            except Exception:  # one unanalysable file must not sink the search
                 self.failures += 1
                 if self.failures == 1:
                     log.exception("references: usages of %r in %s failed", self.name, path)
@@ -970,15 +860,8 @@ class _PyScan:
                 search.add(path, line, col, end_col)
 
     def ordered(self, paths: list[str], family: set[str] | None, unresolved: set[str], deadline: float | None, keep_rest: bool = False) -> Iterator[str]:
-        """``paths`` worth scanning, most likely to type a receiver as a family
-        model first: files with family classes or model-less string refs, then
-        files quoting a family model name, then files naming a relational field
-        pointing to one (order kept within each group). Files with no such hint
-        come last with ``keep_rest``, else they are kept in ``leftovers`` when
-        unknown receivers count. Contents are read lazily so that a time box
-        spends its budget on analysis."""
         search, reg = self.search, self.search.reg
-        if family is None:  # members of base: every receiver is related
+        if family is None:
             yield from paths
             return
         own = {c.path for m in family for c in reg.model_classes(m)}
@@ -1009,16 +892,11 @@ class _PyScan:
         yield from rest_later
 
 
-# ---------------------------------------------------------------------------
-# helpers
-
-
 def _lookup(reg: Any, which: str) -> Callable[..., list[MemberDef]]:
     return {"field": reg.field, "method": reg.method, "attr": reg.attr}[which]
 
 
 def _declarations(reg: Any, model: str, name: str, which: str) -> list[MemberDef]:
-    """Every (re)definition of the member, in any module, incl. inheriting models."""
     if which == "field":
         return field_implementations(reg, model, name)
     if which == "method":
@@ -1028,9 +906,6 @@ def _declarations(reg: Any, model: str, name: str, which: str) -> list[MemberDef
 
 
 def _segment_owners(reg: Any, model: str, path: str, name: str) -> Iterator[tuple[int, str]]:
-    """(offset in ``path``, model owning the segment) of each segment of the
-    field path equal to ``name``, ``path`` starting on ``model``. Comodels are
-    resolved only up to the last such segment (none when it is the first)."""
     segs = path.split(".")
     last = max((i for i, seg in enumerate(segs) if seg == name), default=-1)
     cur: str | None = model
@@ -1046,28 +921,22 @@ def _segment_owners(reg: Any, model: str, path: str, name: str) -> Iterator[tupl
 
 
 def _quotes_model(src: bytes, family: set[str], quoted: set[bytes]) -> bool:
-    """``src`` holds a family model name as a string literal (``quoted``: the
-    names with their quotes)."""
     if len(quoted) <= _MANY_NEEDLES:
         return any(q in src for q in quoted)
     return not family.isdisjoint(m.decode() for m in _QUOTED_MODEL.findall(src))
 
 
 def _has_name(src: bytes, names: set[bytes]) -> bool:
-    """``src`` contains one of the identifiers ``names`` (plain substring test
-    when there are few of them)."""
     if len(names) <= _MANY_NEEDLES:
         return any(n in src for n in names)
     return not names.isdisjoint(_IDENT.findall(src))
 
 
 def _entry_order(entry: tuple) -> tuple:
-    return (entry[2], entry[4], entry[0])  # non-test first, then load order, then path
+    return (entry[2], entry[4], entry[0])
 
 
 def _py_scope(facts: dict, line: int, name: str) -> tuple[str, int, int, str | None]:
-    """Where a Python name defined at ``line`` lives: ("module"|"member"|"local"|
-    "file", first line, last line, owner class)."""
     for s in facts.get(SYMBOLS) or ():
         if s[S_LINE] == line and s[S_NAME] == name:
             return ("module", 0, 0, None)
@@ -1098,8 +967,7 @@ def _qualified_rx(alias: str, name: str) -> re.Pattern:
 
 
 def _js_specs(reg: Any, path: str) -> set[str]:
-    """Non-relative specifiers resolving to the JS file ``path`` (the inverse
-    of ``analysis.js.resolve_specifier``)."""
+    # inverse of analysis.js.resolve_specifier: keep both in sync
     mod = reg.module_of_path(path)
     info = reg.module(mod)
     if info is None:
@@ -1116,8 +984,6 @@ def _js_specs(reg: Any, path: str) -> set[str]:
 
 
 def _js_spec_matches(importer: str, spec: str, path: str, specs: set[str]) -> bool:
-    """Specifier ``spec`` written in ``importer`` resolves to ``path`` (``specs``:
-    its non-relative specifiers)."""
     if not spec.startswith("."):
         return spec in specs
     target = os.path.normpath(os.path.join(os.path.dirname(importer), spec))
@@ -1125,21 +991,16 @@ def _js_spec_matches(importer: str, spec: str, path: str, specs: set[str]) -> bo
 
 
 def _js_declared(code: _PyCode, line: int, col: int) -> str | None:
-    """Identifier declared at ``line:col`` of a JS file (None for an anonymous
-    ``export default``)."""
     start = code.offset(line)
     end = code.text.find("\n", start)
     text = code.text[start : end if end >= 0 else len(code.text)]
     m = _JS_IDENT.match(text, utf16_to_index(text, col))
     if m is None or m.group() in ("export", "default") or text[m.end() :].lstrip().startswith("."):
-        return None  # anonymous default export, or ``export default expr.member``: no local binding
+        return None  # anonymous default export or export default expr.member: no local binding
     return m.group()
 
 
 def _js_exported_as(code: _PyCode, line: int, local: str) -> list[str]:
-    """Names under which a JS module exports its declaration ``local`` on
-    ``line``: ``export [default] function local``, ``export {local as x}``,
-    ``export default local``."""
     start = code.offset(line)
     m = re.match(r"[ \t]*export\s+(default\b)?", code.text[start : start + 80])
     out = (["default" if m.group(1) else local] if m else []) + _js_reexports(code.text, local)
@@ -1147,15 +1008,12 @@ def _js_exported_as(code: _PyCode, line: int, local: str) -> list[str]:
 
 
 def _js_star_reexport(text: str, importer: str, path: str, specs: set[str]) -> bool:
-    """``text`` re-exports every name of ``path`` (``export * from``)."""
     if "export" not in text:
         return False
     return any(_js_spec_matches(importer, m.group(2), path, specs) for m in _JS_STAR_EXPORT.finditer(text))
 
 
 def _js_reexports(text: str, local: str) -> list[str]:
-    """Names under which a module exports its binding ``local`` (``export {local
-    as x}``, ``export {x as local} from``, ``export default local``)."""
     if "export" not in text:
         return []
     out = []
@@ -1163,7 +1021,7 @@ def _js_reexports(text: str, local: str) -> list[str]:
         for part in m.group(1).split(","):
             name, _, alias = part.strip().partition(" as ")
             name, alias = name.strip(), alias.strip()
-            if m.group(2):  # export {name as alias} from: ``alias`` is the local binding
+            if m.group(2):  # export {name as alias} from: import_bindings keys it by alias
                 if (alias or name) == local:
                     out.append(local)
             elif name == local:
@@ -1180,15 +1038,12 @@ def _js_member_rx(namespace: str, name: str) -> re.Pattern:
     return re.compile(r"(?<![\w$.])" + re.escape(namespace) + r"\s*\.\s*(" + re.escape(name) + r")(?![\w$])")
 
 
-
 class _PyCode:
-    """Python (or JS) text with its string/comment spans and line offsets."""
-
     __slots__ = ("text", "starts", "ends", "lines", "kwargs")
 
     def __init__(self, text: str, skip: re.Pattern = _PY_SKIP, kwargs: bool = True):
         self.text = text
-        self.kwargs = kwargs  # ``name=`` is a keyword argument (Python), not a use
+        self.kwargs = kwargs
         spans = [m.span() for m in skip.finditer(text)]
         self.starts = [s for s, _ in spans]
         self.ends = [e for _, e in spans]

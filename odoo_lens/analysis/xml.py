@@ -1,35 +1,3 @@
-"""XML analysis: targets under the cursor in data files, views, server QWeb and
-owl templates, plus the model context of view-arch references.
-
-The cursor is matched against the refs and record ids of ``ctx.facts`` (a full
-extraction of the current text); XML is never re-parsed here.
-
-Model of a view-arch reference (``arch_ref_model`` / ``arch_ref_candidates``,
-also used by references and diagnostics):
-
-* the root model is the view model of the record (``<field name="model">``,
-  else the ``inherit_id`` chain), walked through the x2many fields of the ref's
-  *subpath* (sub-views ``<field name="line_ids"><list>...``);
-* inheritance specs (elements with ``position=``) of inherited views: Odoo
-  locates ``<field name="X">`` on the FIRST field X anywhere in the combined
-  parent arch - possibly inside an x2many sub-view - and an xpath on its path
-  steps; the content inserted around the located node belongs to that node's
-  model. When the extractor's guess (spec at the arch root, ``field[@name]``
-  xpath steps descending only into explicit sub-view steps) does not own the
-  anchor, the anchor is looked up in the arch of the parent view chain, then of
-  the sibling extensions in scope, and the spec content is re-rooted on the
-  model found there. ``a//b`` and ``field[@name='x']/list`` xpath steps descend
-  into the comodel of ``x``; a sub-view step not reached through a field step
-  makes the content model unknown (candidates then include the sub-view models
-  of the parent arch). Odoo ignores everything but ``<attribute>`` inside a
-  ``position="attributes"`` spec, and a ``<button name>`` spec may locate an
-  action/special button: such refs get no model.
-
-The element nesting needed to find the spec enclosing a ref is not part of the
-facts: it is recovered with a cheap tag scan of the record's lines (the current
-text, else the file on disk when it still matches the facts).
-"""
-
 from __future__ import annotations
 
 import os
@@ -66,37 +34,29 @@ from ..extract.xmlfacts import SUBVIEW_TAGS
 from ..registry import MAGIC_FIELDS, RecordRef
 from .targets import FIELD, METHOD, MODEL, TEMPLATE, XMLID, Target
 
-NEAR = 25  # max distance (UTF-16 columns) between the cursor and a token picked leniently
+NEAR = 25  # UTF-16 cols; Claude's columns are often a few off: snap to the nearest token
 ARCH_ROLES = frozenset({"arch", "label", "expr", "button"})
-# refs whose model comes from their record (ir.rule domains, cron code) or from a view
 MODEL_ROLES = frozenset({"record_domain", "code", "arch_domain"})
-MAX_NAME_CANDIDATES = 8  # name-based fallback when the view model is unknown
-_CHAIN_DEPTH = 12  # inherit_id hops followed
-_NESTING = 3  # parent refs resolved recursively (their own specs may need their parents)
+MAX_NAME_CANDIDATES = 8
+_CHAIN_DEPTH = 12
+_NESTING = 3
 
-# tie-break priority of tokens at the same distance from the cursor (lower wins)
 _PRIO = {REF_MODEL: 0, REF_FIELD: 1, REF_METHOD: 1, REF_XMLID: 2, REF_QWEB: 2}
-_RECORD_PRIO = 3  # refs win over record ids
-_PARENT = "parent."  # attrs domains (16.0): field of the record of the enclosing x2many level
+_RECORD_PRIO = 3
+_PARENT = "parent."  # 16.0 attrs domains: field of the record of the enclosing x2many level
 
 _TAG_RE = re.compile(
     r"""<!--.*?-->|<!\[CDATA\[.*?\]\]>|<[?!][^>]*>|<(/?)([A-Za-z_][\w:.\-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>""",
     re.S,
 )
 _ATTR_RE = re.compile(r"""([\w:.\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-# same patterns as the extractor (refs of xpath field steps are emitted per match)
+# next two must match extract/xmlfacts.py: xpath field-step refs are paired per regex match
 _XPATH_FIELD_RE = re.compile(r"""field\[@name\s*=\s*(['"])([A-Za-z0-9_]+)\1\]""")
 _XPATH_EXT_STEP_RE = re.compile(r"""/+([A-Za-z_][\w\-]*)""")
 _XPATH_STEP_RE = re.compile(r"""(/+)(\.\.?|\*|[A-Za-z_][\w\-]*)""")
 
 
-# ---------------------------------------------------------------------------
-# cursor -> token
-
-
 def nearest(cands: Iterable[tuple[int, int, int, Any]], col: int, near: int = NEAR) -> Any:
-    """Payload of the candidate ``(col, end_col, priority, payload)`` under or
-    nearest to ``col`` (within ``near`` columns); ties go to the lowest priority."""
     best = None
     best_key: tuple | None = None
     for c0, c1, prio, payload in cands:
@@ -115,8 +75,6 @@ def nearest(cands: Iterable[tuple[int, int, int, Any]], col: int, near: int = NE
 
 
 def path_segment(value: str, col: int, cursor: int) -> tuple[int, int, int]:
-    """(index, start col, end col) of the segment of dotted ``value`` (starting at
-    ``col``) under ``cursor``; a cursor outside the value picks the nearest end."""
     start = col
     segs = value.split(".")
     for i, seg in enumerate(segs):
@@ -128,9 +86,6 @@ def path_segment(value: str, col: int, cursor: int) -> tuple[int, int, int]:
 
 
 def segment_target(registry: Any, model: str | None, ref: tuple, cursor: int, scope: frozenset | None, extra: dict) -> Target | None:
-    """FIELD target for the segment of the dotted field path of ``ref`` (first
-    segment on ``model``) under ``cursor``; None when the segment's model is
-    unknown (an earlier segment does not resolve)."""
     value = ref[R_VALUE]
     i, c0, c1 = path_segment(value, ref[R_COL], cursor)
     segs = value.split(".")
@@ -151,7 +106,7 @@ def _pick(facts: dict, line: int, col: int, text: str = "") -> tuple[str, Any] |
         if rec[X_LINE] == line and rec[X_ID]:
             cands.append((rec[X_COL], rec[X_END_COL], _RECORD_PRIO, ("record", i)))
     if text and not any(c0 <= col <= c1 for c0, c1, _p, _x in cands) and on_unref_identifier(text, col):
-        return None  # an identifier no ref covers (domain, code, expression): never trade it for a neighbour
+        return None  # uncovered identifier (domain, code, expression): never snap to a neighbour
     return nearest(cands, col)
 
 
@@ -160,11 +115,8 @@ _SYNTAX_WORDS = frozenset(
 )
 
 
+# Tag/attribute names keep lenient snapping: Claude often lands on `name` of name="partner_id".
 def on_unref_identifier(text: str, col16: int) -> bool:
-    """True if the cursor is on an identifier inside an attribute value or an
-    element's text (where tokens are code: domains, expressions, cron code).
-    A cursor on tag or attribute names keeps the lenient snapping (Claude often
-    lands on ``name`` of ``name="partner_id"``)."""
     idx = utf16_to_index(text, col16)
     ch = text[idx : idx + 1]
     prev = text[idx - 1 : idx] if idx else ""
@@ -177,7 +129,7 @@ def on_unref_identifier(text: str, col16: int) -> bool:
     while hi < len(text) and (text[hi].isalnum() or text[hi] == "_"):
         hi += 1
     if text[lo:hi] in _SYNTAX_WORDS:
-        return False  # attrs keys, operators, constants: snapping to the nearby field is fine
+        return False
     in_tag = False
     quote = ""
     for c in text[:idx]:
@@ -192,10 +144,6 @@ def on_unref_identifier(text: str, col16: int) -> bool:
         elif c == "<":
             in_tag = True
     return bool(quote) or not in_tag
-
-
-# ---------------------------------------------------------------------------
-# targets
 
 
 def targets_at(ctx: Any) -> list[Target]:
@@ -249,7 +197,7 @@ def _member_targets(ctx: Any, facts: dict, ref: tuple) -> list[Target]:
         n = len(_PARENT)
         if model is None:
             return []
-        if ctx.col < ref[R_COL] + n:  # on "parent": the record of the enclosing level
+        if ctx.col < ref[R_COL] + n:
             return [Target(MODEL, model=model, origin=(ref[R_LINE], ref[R_COL], ref[R_COL] + n - 1), extra={"role": "parent"})]
         rest = (ref[R_KIND], ref[R_VALUE][n:], ref[R_LINE], ref[R_COL] + n, ref[R_END_COL], ref[R_CTX])
         target = segment_target(registry, model, rest, ctx.col, scope, dict(extra, path=ref[R_VALUE]))
@@ -288,29 +236,13 @@ def _member_targets(ctx: Any, facts: dict, ref: tuple) -> list[Target]:
 
 
 def ref_name(ref: tuple) -> str:
-    """Member name of a field/method ref: first path segment (after ``parent.``
-    in 16.0 ``attrs`` domains), without ``@lang``."""
     value = ref[R_VALUE]
     if value.startswith(_PARENT):
         value = value[len(_PARENT) :]
     return value.split(".", 1)[0].split("@", 1)[0]
 
 
-# ---------------------------------------------------------------------------
-# view model context: public API
-
-
 def arch_ref_model(registry: Any, path: str, facts: dict, ref: tuple, source: bytes | str | None = None) -> str | None:
-    """Model owning the field/method named by ``ref``.
-
-    ``("record", i)``: the record's model. ``("arch"|"label"|"expr"|"button", i,
-    subpath)``: the first of ``arch_ref_candidates`` that has the member, else
-    the best guess (so that callers can report an unknown field on it): the view
-    model of record ``i`` of ``facts`` walked through ``subpath``, re-rooted for
-    the content of inheritance specs located elsewhere (see the module
-    docstring). ``source``: the text ``facts`` were extracted from (default: the
-    file on disk, when it still matches). Also answers ``("function", model)``,
-    CSV ``("csv_header", model)`` and ``("domain", model)``. None when unknown."""
     rctx = ref[R_CTX]
     role = rctx[0]
     if role in ARCH_ROLES:
@@ -340,8 +272,6 @@ def arch_ref_model(registry: Any, path: str, facts: dict, ref: tuple, source: by
 
 
 def record_target_model(registry: Any, path: str, rec: tuple) -> str | None:
-    """Model a data record works on: ``res_model`` (actions) or the model of its
-    ``model_id`` (ir.rule, ir.cron, ir.actions.server, ir.access)."""
     info = rec[X_INFO] or {}
     if info.get("res_model"):
         return info["res_model"]
@@ -356,20 +286,12 @@ def record_target_model(registry: Any, path: str, rec: tuple) -> str | None:
 
 
 def arch_ref_candidates(registry: Any, path: str, facts: dict, ref: tuple, source: bytes | str | None = None) -> list[str]:
-    """Candidate models of an arch ``ref``, best guess first.
-
-    For refs of inherited views whose name is not a member of the best guess,
-    adds the models under which a field (a button for methods) with that name
-    appears in the arch of the parent view chain (then of sibling extensions),
-    the models where the enclosing spec's anchor appears, and - when the spec
-    targets a sub-view of an unknown x2many - the sub-view models of the
-    parent arch."""
     rctx = ref[R_CTX]
     if rctx[0] not in ARCH_ROLES or ref[R_VALUE].startswith(_PARENT):
         model = arch_ref_model(registry, path, facts, ref, source)
         return [model] if model else []
     best, _raw, root, spec = _resolve(registry, path, facts, ref, source, 0)
-    out = [best] if best else []  # a re-rooted spec content is not on the extractor's model
+    out = [best] if best else []
     rec = _record(facts, rctx[1])
     if root is None or rec is None or not (rec[X_INFO] or {}).get("inherit_id") or best is None:
         return out
@@ -393,8 +315,6 @@ def arch_ref_candidates(registry: Any, path: str, facts: dict, ref: tuple, sourc
 
 
 def view_root_model(registry: Any, path: str, facts: dict, rec_index: int) -> str | None:
-    """View model of record ``rec_index`` of ``facts`` (follows ``inherit_id``;
-    for an override of another module's view, that view's model)."""
     memo = _memo(registry)
     key = ("root", path, rec_index)
     hit = memo.get(key)
@@ -406,7 +326,7 @@ def view_root_model(registry: Any, path: str, facts: dict, rec_index: int) -> st
         module = registry.module_of_path(path)
         xmlid = registry.qualify_xmlid(rec[X_ID], module) if rec[X_ID] else ""
         model = registry.view_model(RecordRef(xmlid, path, rec_index, module, rec))
-        if model is None and xmlid:
+        if model is None and xmlid:  # override of another module's view: that view's model
             for other in registry.records(xmlid):
                 if other.path != path or other.index != rec_index:
                     model = registry.view_model(other)
@@ -417,8 +337,6 @@ def view_root_model(registry: Any, path: str, facts: dict, rec_index: int) -> st
 
 
 def comodel(registry: Any, model: str, name: str, scope: frozenset | None, _depth: int = 0) -> str | None:
-    """Comodel of field ``model.name`` (scoped, then unscoped), following the
-    ``related=`` path of related relational fields that declare no comodel."""
     co = registry.comodel(model, name, scope) if scope is not None else None
     co = co or registry.comodel(model, name)
     if co is not None or _depth > 3:
@@ -431,10 +349,6 @@ def comodel(registry: Any, model: str, name: str, scope: frozenset | None, _dept
     for seg in related.split("."):
         cur = comodel(registry, cur, seg, scope, _depth + 1) if cur else None
     return cur
-
-
-# ---------------------------------------------------------------------------
-# helpers
 
 
 def _record(facts: dict, index: int) -> tuple | None:
@@ -451,14 +365,11 @@ def _walk(registry: Any, scope: frozenset | None, model: str | None, subpath: It
 
 
 def _has_member(registry: Any, model: str, name: str, kind: str, scope: frozenset | None) -> bool:
-    """``model`` has a field (method for REF_METHOD) ``name`` visible in ``scope``."""
     lookup = registry.method if kind == REF_METHOD else registry.field
     return bool(lookup(model, name, scope))
 
 
 def _first_with_member(registry: Any, models: Iterable[str], name: str, kind: str, scope: frozenset | None) -> str | None:
-    """First of ``models`` having the member in scope, else (a module outside the
-    dependencies defines it) in the whole env."""
     models = [m for m in models if m]
     for m in models:
         if _has_member(registry, m, name, kind, scope):
@@ -471,10 +382,9 @@ def _first_with_member(registry: Any, models: Iterable[str], name: str, kind: st
 
 
 def _name_candidates(registry: Any, name: str, kind: str, scope: frozenset | None) -> list[str]:
-    """Models (in scope) having a member ``name``, when the view model is unknown."""
     models = registry.models_with_member(name)
     if name in MAGIC_FIELDS or "" in models:
-        return []  # a BaseModel member exists on every model: no basis to pick one
+        return []  # BaseModel/magic member: on every model, no basis to pick one
     if not models or len(models) > 4 * MAX_NAME_CANDIDATES:
         return []
     lookup = registry.method if kind == REF_METHOD else registry.field
@@ -482,12 +392,7 @@ def _name_candidates(registry: Any, name: str, kind: str, scope: frozenset | Non
     return found if len(found) <= MAX_NAME_CANDIDATES else []
 
 
-# ---------------------------------------------------------------------------
-# resolution of arch refs
-
-
 def _parent_level(registry: Any, path: str, facts: dict, ref: tuple) -> str | None:
-    """Model of the enclosing x2many level of a ``parent.x`` ref (16.0 attrs)."""
     rctx = ref[R_CTX]
     subpath = rctx[2] if len(rctx) > 2 else ()
     if not subpath:
@@ -496,8 +401,8 @@ def _parent_level(registry: Any, path: str, facts: dict, ref: tuple) -> str | No
     return _walk(registry, registry.scope_for_path(path), root, subpath[:-1]) if root else None
 
 
+# Odoo anchors <field name=X> specs on the FIRST field X of the combined parent arch, sub-views too.
 def _resolve(registry: Any, path: str, facts: dict, ref: tuple, source: bytes | str | None, depth: int) -> tuple:
-    """(best model, extractor's model, view root model, enclosing spec or None)."""
     rctx = ref[R_CTX]
     rec_index = rctx[1]
     subpath = rctx[2] if len(rctx) > 2 else ()
@@ -524,7 +429,7 @@ def _resolve(registry: Any, path: str, facts: dict, ref: tuple, source: bytes | 
                     raw = None  # it may locate an action/special button: not a method call
                 best = best or raw
         elif spec.position == "attributes":
-            best = raw = None  # only <attribute> children are applied: other content is ignored by Odoo
+            best = raw = None  # Odoo applies only the <attribute> children: other content is ignored
         else:
             located = _content_model(registry, path, facts, rec_index, root, scope, spec, depth)
             prefix = spec.base + spec.ext_sub
@@ -536,20 +441,18 @@ def _resolve(registry: Any, path: str, facts: dict, ref: tuple, source: bytes | 
 
 
 def _step_owner(registry: Any, path: str, facts: dict, rec_index: int, root: str, scope: frozenset | None, spec: "_Spec", i: int, depth: int) -> str | None:
-    """Model owning the node named by step ``i`` of a spec (located node for the last)."""
     name, owner_sub, unknown = spec.steps[i]
     kind = spec.kind if i == len(spec.steps) - 1 else REF_FIELD
     model = None if unknown else _walk(registry, scope, root, spec.base + owner_sub)
     if model and _has_member(registry, model, name, kind, scope):
         return model
     occ = _occurrences(registry, path, facts, rec_index, kind, name, depth)
-    if unknown:  # inside a sub-view of an unknown x2many: prefer non-root occurrences
+    if unknown:
         occ = [m for m in occ if m != root] + [m for m in occ if m == root]
     return _first_with_member(registry, ([model] if model else []) + occ, name, kind, scope)
 
 
 def _content_model(registry: Any, path: str, facts: dict, rec_index: int, root: str, scope: frozenset | None, spec: "_Spec", depth: int) -> str | None:
-    """Model of the nodes inserted by a spec (None when unknown)."""
     if spec.content_unknown:
         return None
     if not spec.steps:
@@ -560,14 +463,7 @@ def _content_model(registry: Any, path: str, facts: dict, rec_index: int, root: 
     return owner
 
 
-# ---------------------------------------------------------------------------
-# parent view chain and sibling extensions
-
-
 def _occurrences(registry: Any, path: str, facts: dict, rec_index: int, kind: str, name: str, depth: int) -> list[str]:
-    """Models of the nodes named ``name`` (fields, or buttons for methods) in
-    the arch of the parent views of a record, nearest parent first; when none
-    owns ``name``, of the other extensions of those views (top-level requests)."""
     memo = _memo(registry)
     key = ("occ", path, rec_index, kind, name, depth > 0)
     hit = memo.get(key)
@@ -593,13 +489,12 @@ def _collect(registry: Any, views: list[tuple[RecordRef, dict]], kind: str, name
             if model is None:
                 continue
             if model == view_root_model(registry, prec.path, pfacts, prec.index) and root and root != model and root not in out:
-                out.append(root)  # a primary view on another model: its root is ours
+                out.append(root)  # primary view on another model: parent root nodes are on ours
             if model not in out:
                 out.append(model)
 
 
 def _parent_views(registry: Any, path: str, facts: dict, rec_index: int) -> list[tuple[RecordRef, dict]]:
-    """(record, facts) of the views up the ``inherit_id`` chain of a record."""
     memo = _memo(registry)
     key = ("chain", path, rec_index)
     hit = memo.get(key)
@@ -632,8 +527,6 @@ def _parent_views(registry: Any, path: str, facts: dict, rec_index: int) -> list
 
 
 def _siblings(registry: Any, path: str, facts: dict, rec_index: int, chain: list[tuple[RecordRef, dict]]) -> list[tuple[RecordRef, dict]]:
-    """Other extensions (in scope) of the views of the chain: their nodes are
-    part of the combined arch a spec is applied to."""
     scope = registry.scope_for_path(path)
     seen = {(path, rec_index)} | {(p.path, p.index) for p, _ in chain}
     out = []
@@ -651,14 +544,10 @@ def _siblings(registry: Any, path: str, facts: dict, rec_index: int, chain: list
 
 
 def _arch_names(registry: Any, path: str, facts: dict) -> dict[int, dict[tuple[str, str], list[tuple]]]:
-    """{record index: {(ref kind, name): [refs]}} of the field/button nodes of
-    the view archs of a file."""
     return _arch_refs(registry, path, facts)[1]
 
 
 def _arch_refs(registry: Any, path: str, facts: dict) -> tuple[dict[int, list[tuple]], dict[int, dict[tuple[str, str], list[tuple]]]]:
-    """Field/button node refs of the view archs of a file, by record: in
-    document order, and by (kind, name)."""
     memo = _memo(registry)
     key = ("arch_refs", path)
     hit = memo.get(key)
@@ -676,7 +565,6 @@ def _arch_refs(registry: Any, path: str, facts: dict) -> tuple[dict[int, list[tu
 
 
 def _subview_models(registry: Any, path: str, facts: dict, rec_index: int) -> list[str]:
-    """Models of the x2many sub-views found in the arch of the parent views."""
     memo = _memo(registry)
     key = ("subviews", path, rec_index)
     hit = memo.get(key)
@@ -699,19 +587,10 @@ def _subview_models(registry: Any, path: str, facts: dict, rec_index: int) -> li
     return out
 
 
-# ---------------------------------------------------------------------------
-# inheritance specs (element nesting recovered from the record's text)
-
-
+# position= element. steps: (name, owner subpath, unknown ctx) per <field>/<button>/xpath field
+# step, last = located node; step_refs: their refs ([] if unpaired); base: context subpath;
+# ext_sub: x2many fields the extractor descended into; descends: content in the field's sub-view.
 class _Spec:
-    """An element with ``position=`` in an inherited view arch.
-
-    ``steps``: the nodes it names - ``[(name, owner subpath, unknown context)]``,
-    one for ``<field>``/``<button>``, one per ``field[@name]`` step of an xpath
-    (the last one is the located node); ``step_refs``: the refs of those names
-    (empty when they cannot be paired); ``base``: subpath of the spec's context;
-    ``ext_sub``: x2many fields the extractor descended into for the content."""
-
     __slots__ = ("start", "end", "tstart", "tend", "position", "kind", "steps", "step_refs", "base", "ext_sub", "descends", "unknown", "content_unknown")
 
     def __init__(self, start: int, end: int, tstart: int, tend: int, position: str):
@@ -725,13 +604,12 @@ class _Spec:
         self.step_refs: list[tuple] = []
         self.base: tuple = ()
         self.ext_sub: tuple = ()
-        self.descends = False  # the content goes inside a sub-view of the located field
+        self.descends = False
         self.unknown = False  # the located node may sit in a sub-view of an unknown x2many
-        self.content_unknown = False  # ... and the content model cannot be derived at all
+        self.content_unknown = False
 
 
 def _enclosing_spec(registry: Any, path: str, facts: dict, rec_index: int, ref: tuple, source: bytes | str | None) -> tuple["_Spec | None", int]:
-    """Innermost spec containing ``ref`` and the ref's offset in the record text."""
     info = _record_specs(registry, path, facts, rec_index, source)
     if info is None:
         return None, -1
@@ -746,9 +624,8 @@ def _enclosing_spec(registry: Any, path: str, facts: dict, rec_index: int, ref: 
     return best, pos
 
 
+# offsets: str indexes into the record's lines joined with "\n" (not UTF-16 columns)
 def _record_specs(registry: Any, path: str, facts: dict, rec_index: int, source: bytes | str | None) -> tuple | None:
-    """(lines, first line, line offsets, specs) of a record (offsets are str
-    indexes in the record's lines joined by newlines)."""
     memo = _memo(registry)
     key = ("specs", path, rec_index)
     hit = memo.get(key)
@@ -773,13 +650,12 @@ def _record_specs(registry: Any, path: str, facts: dict, rec_index: int, source:
 
 
 def _scan_specs(text: str) -> list[tuple]:
-    """Elements carrying ``position=``: (start, end, tag start, tag end, tag, attrs)."""
     out = []
     stack: list[list] = []
     for m in _TAG_RE.finditer(text):
         tag = m.group(2)
         if tag is None:
-            continue  # comment, CDATA, processing instruction
+            continue
         if m.group(1):
             for i in range(len(stack) - 1, -1, -1):
                 if stack[i][0] == tag:
@@ -820,7 +696,7 @@ def _make_spec(raw: tuple, refs: list[tuple]) -> _Spec:
     elif tag == "xpath":
         _xpath_spec(spec, attrs.get("expr") or "", [r for r in in_tag if r[R_KIND] == REF_FIELD and r[R_CTX][0] == "arch"])
     elif tag != "form":
-        spec.unknown = True  # <page>, <group>, <column>, <list>...: the first match may be in a sub-view
+        spec.unknown = True  # <page>, <group>, <list>...: the first match may be in a sub-view
     return spec
 
 
@@ -832,14 +708,15 @@ def _xpath_spec(spec: _Spec, expr: str, refs: list[tuple]) -> None:
     steps = [(m.start(1), m.group(1), m.start(2), m.group(2)) for m in _XPATH_STEP_RE.finditer(expr)]
     ext_steps = [(m.start(), m.group(1)) for m in _XPATH_EXT_STEP_RE.finditer(expr)]
     field_starts = {m.start() for m in fields}
-    unknown_from = None  # position of a sub-view step not reached through its x2many field
+    unknown_from = None
     prev_field = False
     for k, (_, _sep, tpos, tag) in enumerate(steps):
         if tpos in field_starts:
             prev_field = True
             continue
+        # a leading //form is the arch root, not a sub-view
         if unknown_from is None and tag in SUBVIEW_TAGS and not prev_field and not (k == 0 and tag == "form"):
-            unknown_from = tpos  # (a leading //form is the arch root)
+            unknown_from = tpos
         prev_field = False
     sub: list[str] = []
     ext: list[str] = []
@@ -851,8 +728,9 @@ def _xpath_spec(spec: _Spec, expr: str, refs: list[tuple]) -> None:
         spec.descends = nxt is not None and (nxt[1] in SUBVIEW_TAGS or (nxt[0] == "//" and nxt[1] not in (".", "..")))
         if spec.descends:
             sub.append(name)
+        # mirrors xmlfacts.xpath except that one also descends when the next step is `field`
         if next((t for (pos, t) in ext_steps if pos >= m.end()), None) in SUBVIEW_TAGS:
-            ext.append(name)  # what the extractor did
+            ext.append(name)
     spec.ext_sub = tuple(ext)
     spec.unknown = unknown_from is not None
     spec.content_unknown = spec.unknown and not (spec.steps and spec.steps[-1][2])
@@ -870,8 +748,6 @@ _DISK_SIZE = 32
 
 
 def _source_lines(path: str, source: bytes | str | None, rec: tuple) -> list[str] | None:
-    """Lines of the text the facts were extracted from: ``source``, else the file
-    on disk when it still matches the facts (record id at its position)."""
     if source is not None:
         text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
         return text.split("\n")
@@ -895,14 +771,11 @@ def _source_lines(path: str, source: bytes | str | None, rec: tuple) -> list[str
     if rec[X_ID] and rec[X_LINE] < len(lines):
         line = lines[rec[X_LINE]]
         if line[utf16_to_index(line, rec[X_COL]) : utf16_to_index(line, rec[X_END_COL])] != rec[X_ID]:
-            return None  # the file changed since the facts were extracted
+            return None
     return lines
 
 
-# ---------------------------------------------------------------------------
-# memo: per registry generation, entries validated by the identity of the facts
-
-
+# Memo reset per registry generation; an entry is valid only while its facts are the same object.
 class _MemoState:
     __slots__ = ("registry", "generation", "data")
 

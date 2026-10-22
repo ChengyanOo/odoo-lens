@@ -1,17 +1,3 @@
-"""JSON-RPC 2.0 over stdio with LSP base-protocol framing (Content-Length headers).
-
-Zero dependencies. Threading model:
-
-* a reader thread parses incoming messages. ``$/cancelRequest`` and responses to
-  server-initiated requests are handled right there (so they take effect while a
-  handler is running); everything else is queued;
-* the dispatcher (the thread calling :meth:`Endpoint.serve_forever`) runs request
-  and notification handlers strictly in arrival order, so handlers never race
-  each other and shared state needs no locks;
-* background threads hand work back to the dispatcher with :meth:`Endpoint.post`
-  (or :meth:`Endpoint.post_later` for debounced work).
-"""
-
 from __future__ import annotations
 
 import json
@@ -36,8 +22,6 @@ REQUEST_CANCELLED = -32800
 
 
 class ResponseError(Exception):
-    """Raise from a request handler to answer with a JSON-RPC error."""
-
     def __init__(self, code: int, message: str, data: Any = None):
         super().__init__(message)
         self.code = code
@@ -51,8 +35,6 @@ class Cancelled(ResponseError):
 
 
 class CancelToken:
-    """Cooperative cancellation flag handed to every request handler."""
-
     __slots__ = ("cancelled",)
 
     def __init__(self) -> None:
@@ -67,19 +49,13 @@ NEVER_CANCELLED = CancelToken()
 
 
 class Transport:
-    """Content-Length framed JSON messages over a pair of binary streams."""
-
     def __init__(self, rfile: BinaryIO, wfile: BinaryIO):
         self._r = rfile
         self._w = wfile
         self._wlock = threading.Lock()
 
+    # None on EOF; a malformed body raises ValueError after being fully consumed (stream stays in sync)
     def read(self) -> Any:
-        """Return the next decoded message, ``None`` on EOF.
-
-        Raises ``ValueError`` (``json.JSONDecodeError``) for a malformed body; the
-        stream stays usable because the body was consumed entirely.
-        """
         length = -1
         while True:
             line = self._r.readline()
@@ -88,7 +64,7 @@ class Transport:
             line = line.strip()
             if not line:
                 if length < 0:
-                    continue  # tolerate stray blank lines between messages
+                    continue
                 break
             name, _, value = line.partition(b":")
             if name.strip().lower() == b"content-length":
@@ -112,14 +88,9 @@ RequestHandler = Callable[[Any, CancelToken], Any]
 NotificationHandler = Callable[[Any], None]
 
 
+# Reader thread handles $/cancelRequest, shutdown, exit and client responses; the rest is queued.
+# Dispatcher (serve_forever's thread) runs handlers in arrival order: no races, no locks needed.
 class Endpoint:
-    """Dispatches JSON-RPC messages to registered handlers.
-
-    Request handlers receive ``(params, cancel_token)`` and return the result
-    (anything JSON-serializable) or raise :class:`ResponseError`. Notification
-    handlers receive ``params``.
-    """
-
     def __init__(self, transport: Transport):
         self.transport = transport
         self._requests: dict[str, RequestHandler] = {}
@@ -133,18 +104,14 @@ class Endpoint:
         self._stopped = False
         self.shutdown_received = False
         self.dispatcher_thread: threading.Thread | None = None
-        # called on the reader thread for "exit" (default None: stop(); serve_stdio installs a hard exit, see _route)
+        # "exit" hook, run on the reader thread; None means stop(); serve_stdio installs a hard exit
         self.on_exit: Callable[[int], None] | None = None
-
-    # -- registration -------------------------------------------------------
 
     def on_request(self, method: str, handler: RequestHandler) -> None:
         self._requests[method] = handler
 
     def on_notification(self, method: str, handler: NotificationHandler) -> None:
         self._notifications[method] = handler
-
-    # -- outgoing -----------------------------------------------------------
 
     def notify(self, method: str, params: Any = None) -> None:
         msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
@@ -153,7 +120,6 @@ class Endpoint:
         self.transport.write(msg)
 
     def request(self, method: str, params: Any = None) -> Future:
-        """Send a server->client request; the returned future resolves with its result."""
         fut: Future = Future()
         with self._lock:
             self._next_id += 1
@@ -165,15 +131,11 @@ class Endpoint:
         self.transport.write(msg)
         return fut
 
-    # -- scheduling -----------------------------------------------------------
-
+    # thread-safe: how background threads hand work to the dispatcher (post_later: debounced per key)
     def post(self, fn: Callable[..., Any], *args: Any) -> None:
-        """Run ``fn(*args)`` on the dispatcher thread (thread-safe)."""
         self._queue.put(("task", fn, args))
 
     def post_later(self, delay: float, key: Any, fn: Callable[..., Any], *args: Any) -> None:
-        """Debounced :meth:`post`: a newer call with the same ``key`` replaces a pending one."""
-
         def fire() -> None:
             with self._lock:
                 if self._timers.get(key) is timer:
@@ -190,11 +152,8 @@ class Endpoint:
         timer.start()
 
     def stop(self) -> None:
-        """Make :meth:`serve_forever` return after the current message."""
         self._stopped = True
         self._queue.put(_EOF)
-
-    # -- main loops -----------------------------------------------------------
 
     def serve_forever(self) -> None:
         self.dispatcher_thread = threading.current_thread()
@@ -212,7 +171,7 @@ class Endpoint:
                     self._handle_notification(item[1])
                 else:
                     item[1](*item[2])
-            except Exception:  # never let one message kill the server
+            except Exception:
                 log.exception("unhandled error while processing %s", kind)
         with self._lock:
             for timer in self._timers.values():
@@ -242,8 +201,7 @@ class Endpoint:
     def _route(self, msg: dict) -> None:
         method = msg.get("method")
         if method is not None:
-            # shutdown/exit must never wait behind a long request (Claude Code does not
-            # always await shutdown and would otherwise orphan a busy server)
+            # never queued behind a long request: Claude Code may not await shutdown (orphaned server)
             if method == "shutdown" and "id" in msg:
                 self.shutdown_received = True
                 self.transport.write({"jsonrpc": "2.0", "id": msg["id"], "result": None})

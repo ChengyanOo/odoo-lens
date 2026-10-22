@@ -1,9 +1,4 @@
-"""(Re)generate tests/fixtures/mini: a tiny synthetic Odoo checkout used by unit tests.
-
-Layout mimics an odev worktree: mini/{odoo,enterprise,custom}. Line numbers of
-interesting tokens are referenced by tests, so append new content at the END of
-files rather than inserting in the middle.
-"""
+# Tests reference line numbers in tests/fixtures/mini: append new content at file END only.
 
 import os
 import shutil
@@ -12,7 +7,6 @@ import textwrap
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests", "fixtures", "mini")
 
 FILES = {
-    # ------------------------------------------------------------------ framework
     "odoo/odoo-bin": "#!/usr/bin/env python3\nimport odoo\nodoo.cli.main()\n",
     "odoo/odoo/__init__.py": """
         from . import api
@@ -281,7 +275,6 @@ FILES = {
         request = None
         """,
     "odoo/odoo/addons/__init__.py": "",
-    # ------------------------------------------------------------------ base
     "odoo/odoo/addons/base/__init__.py": "from . import models\n",
     "odoo/odoo/addons/base/__manifest__.py": """
         {
@@ -474,7 +467,6 @@ FILES = {
             <menuitem id="menu_contacts" name="Contacts" action="action_partner_form" sequence="4"/>
         </odoo>
         """,
-    # ------------------------------------------------------------------ mail
     "odoo/addons/mail/__init__.py": "from . import models\n",
     "odoo/addons/mail/__manifest__.py": """
         {
@@ -500,7 +492,6 @@ FILES = {
                 \"\"\"Post a message on the record.\"\"\"
                 return self.env['res.partner']
         """,
-    # ------------------------------------------------------------------ product
     "odoo/addons/product/__init__.py": "from . import models\n",
     "odoo/addons/product/__manifest__.py": """
         {
@@ -525,7 +516,6 @@ FILES = {
             list_price = fields.Float('Sales Price', digits=(16, 2))
             active = fields.Boolean(default=True)
         """,
-    # ------------------------------------------------------------------ sale
     "odoo/addons/sale/__init__.py": "from . import models\n",
     "odoo/addons/sale/__manifest__.py": """
         {
@@ -645,7 +635,6 @@ FILES = {
             <menuitem id="menu_sale_order" name="Orders" parent="sale_menu_root" action="action_orders"/>
         </odoo>
         """,
-    # ------------------------------------------------------------------ sale_stock
     "odoo/addons/sale_stock/__init__.py": "from . import models\n",
     "odoo/addons/sale_stock/__manifest__.py": """
         {
@@ -695,7 +684,6 @@ FILES = {
             </record>
         </odoo>
         """,
-    # ------------------------------------------------------------------ enterprise
     "enterprise/sale_subscription/__init__.py": "from . import models\n",
     "enterprise/sale_subscription/__manifest__.py": """
         {
@@ -727,7 +715,6 @@ FILES = {
             def action_confirm(self):
                 return super().action_confirm()
         """,
-    # ------------------------------------------------------------------ custom (ticket-like)
     "custom/my_module/__init__.py": "from . import models\n",
     "custom/my_module/__manifest__.py": """
         {

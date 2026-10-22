@@ -1,12 +1,4 @@
-"""Python facts extractor.
-
-Structure (imports, module symbols, classes, fields, methods, model attributes)
-comes from the AST, visiting only module-level statements and class bodies -
-never a full ``ast.walk`` (which would cost ~20 s of CPU on a full Odoo
-checkout). References inside method bodies (``env['x']``, ``.ref('x')``,
-``.mapped('a.b')``, domain tuples, ``res_model``...) are found with byte-level
-regular expressions that start with a literal prefix (fast C scanning).
-"""
+# AST of module and class bodies only: a full ast.walk costs ~20 s CPU on an Odoo checkout.
 
 from __future__ import annotations
 
@@ -41,7 +33,6 @@ from ..facts import (
 )
 from .common import SrcIndex
 
-# Positional parameters of field constructors (after normalization to keywords).
 POSITIONAL = {
     "Many2one": ("comodel_name", "string"),
     "One2many": ("comodel_name", "inverse_name", "string"),
@@ -61,7 +52,6 @@ MODEL_BASES = {
     "CachedModel": "CachedModel",  # saas-19.1+
 }
 FRAMEWORK_CLASSES = frozenset({"BaseModel", "AbstractModel", "Model", "TransientModel", "CachedModel"})
-# literal model attributes whose value names fields of the model itself
 FIELD_NAME_ATTRS = ("_rec_name", "_parent_name", "_fold_name", "_active_name", "_date_name", "_rec_names_search")
 METHOD_KWARGS = ("compute", "inverse", "search", "group_expand", "compute_sql")
 DEC_FIELD_ROLES = {"depends": "depends", "onchange": "onchange", "constrains": "constrains"}
@@ -69,8 +59,6 @@ MAX_TEXT = 120
 
 
 class _Src(SrcIndex):
-    """Source helper: :class:`SrcIndex` plus AST node text and string spans."""
-
     __slots__ = ()
 
     def segment(self, node: ast.AST, limit: int = MAX_TEXT) -> str:
@@ -92,8 +80,8 @@ class _Src(SrcIndex):
             text = text[: limit - 1] + "…"
         return text
 
+    # (line0, utf16 col, utf16 end col) of a single-line str literal's content, quotes excluded
     def string_span(self, node: ast.Constant) -> tuple[int, int, int] | None:
-        """(line0, col16, end_col16) of the *content* of a single-line str literal."""
         if node.lineno != node.end_lineno:
             return None
         l0 = node.lineno - 1
@@ -105,7 +93,7 @@ class _Src(SrcIndex):
             return None
         quote = raw[q : q + 3] if raw[q : q + 3] in (b"'''", b'"""') else raw[q : q + 1]
         if not raw.endswith(quote) or len(raw) < q + 2 * len(quote):
-            return None  # implicit concatenation or odd literal
+            return None
         start = node.col_offset + q + len(quote)
         end = node.end_col_offset - len(quote)
         return l0, self.col(l0, start), self.col(l0, end)
@@ -123,7 +111,6 @@ def _dotted(node: ast.AST) -> str | None:
 
 
 def _literal(node: ast.AST):
-    """Fast literal conversion; raises ValueError for non-literals."""
     if isinstance(node, ast.Constant):
         v = node.value
         if isinstance(v, (str, int, float, bool)) or v is None:
@@ -157,7 +144,6 @@ def _str(node: ast.AST | None) -> str | None:
 
 
 def _str_nodes(node: ast.AST | None) -> list[ast.Constant]:
-    """str constants of a literal str / list / tuple node."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return [node]
     if isinstance(node, (ast.List, ast.Tuple)):
@@ -173,13 +159,11 @@ class _Extractor:
         self.symbols: list[tuple] = []
         self.classes: list[tuple] = []
         self.refs: list[tuple] = []
-        self.class_ranges: list[tuple[int, int, str | None]] = []  # (line0, end_line0, model) for regex refs
-        self.field_classes: set[str] = set()  # names imported from odoo.fields
+        self.class_ranges: list[tuple[int, int, str | None]] = []
+        self.field_classes: set[str] = set()
         self.is_framework_models = path.replace("\\", "/").endswith(
             ("odoo/models.py", "odoo/orm/models.py", "odoo/orm/models_transient.py", "odoo/orm/models_cached.py")
         )
-
-    # -- helpers -----------------------------------------------------------------
 
     def ref_str(self, kind: str, node: ast.Constant, ctx: tuple, value: str | None = None) -> None:
         span = self.s.string_span(node)
@@ -188,13 +172,12 @@ class _Extractor:
         self.refs.append((kind, sys.intern(node.value if value is None else value), span[0], span[1], span[2], ctx))
 
     def ref_parts(self, kind: str, node: ast.Constant, ctx: tuple, sep: str, strip: str = "") -> None:
-        """One ref per ``sep``-separated item of a str literal, with precise ranges."""
         span = self.s.string_span(node)
         value = node.value
         if span is None:
             return
         line, col, end = span
-        exact = (end - col) == len(value)  # no escapes / no wide chars
+        exact = (end - col) == len(value)
         pos = 0
         for part in value.split(sep):
             start = pos
@@ -206,7 +189,7 @@ class _Extractor:
                 lead += 1
             if not item:
                 continue
-            if sep == "," and kind == REF_FIELD and " " in item:  # "_order" items: "date desc"
+            if sep == "," and kind == REF_FIELD and " " in item:
                 item = item.split()[0]
             if exact:
                 c0 = col + start + lead
@@ -215,7 +198,6 @@ class _Extractor:
                 self.refs.append((kind, item, line, col, end, ctx))
 
     def name_pos(self, node: ast.AST, keyword: bytes) -> tuple[int, int, int]:
-        """Position of the name after 'class'/'def' in a ClassDef/FunctionDef."""
         l0 = node.lineno - 1  # type: ignore[attr-defined]
         line = self.s.lines[l0]
         name = node.name.encode("utf-8")  # type: ignore[attr-defined]
@@ -231,16 +213,13 @@ class _Extractor:
         end = node.end_col_offset if node.end_lineno == node.lineno else len(self.s.lines[l0])  # type: ignore[attr-defined]
         return l0, self.s.col(l0, node.col_offset), self.s.col(l0, end)  # type: ignore[attr-defined]
 
-    # -- module level --------------------------------------------------------------
-
     def run(self, tree: ast.Module) -> None:
         self.module_body(tree.body, top=True)
         self.setattr_fields(tree.body)
         self.regex_refs()
 
+    # keyword-named field: global_ = fields.Boolean(...); setattr(IrRule, 'global', global_)
     def setattr_fields(self, body: list[ast.stmt]) -> None:
-        """``global_ = fields.Boolean(...)`` + ``setattr(IrRule, 'global', global_)``:
-        a field named by a Python keyword, attached to the class after its body."""
         if not any(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id == "setattr" for n in body):
             return
         values: dict[str, tuple[ast.stmt, ast.Call, str]] = {}
@@ -264,7 +243,7 @@ class _Extractor:
             cls = self.classes[i]
             model = cls[K_MODEL].get(MI_NAME) or (cls[K_MODEL].get(MI_INHERIT) or [None])[0]
             field = self.field(key, stmt, fcall, ftype, model)
-            l0, c0, c1 = self.node_pos(stmt.targets[0])  # type: ignore[attr-defined]  # the field's own statement
+            l0, c0, c1 = self.node_pos(stmt.targets[0])  # type: ignore[attr-defined]
             field = field[:F_LINE] + (l0, c0, c1) + field[F_END_COL + 1 :]
             self.classes[i] = cls[:K_FIELDS] + (cls[K_FIELDS] + [field],) + cls[K_FIELDS + 1 :]
 
@@ -279,8 +258,7 @@ class _Extractor:
                 for a in node.names:
                     l0, c0, c1 = self.node_pos(a)
                     self.imports.append((mod, a.name, a.asname, node.level or 0, l0, c0, c1))
-                    # field classes imported by name: odoo.fields (any version) or the
-                    # 19+ ORM modules (from .fields_misc import Id, ...)
+                    # bare-name field classes: odoo.fields, or saas-18.3+ odoo/orm modules (from .fields_misc import Id)
                     if a.name != "*" and a.name[:1].isupper() and "field" in mod.rsplit(".", 1)[-1]:
                         self.field_classes.add(a.asname or a.name)
             elif isinstance(node, ast.ClassDef):
@@ -302,8 +280,6 @@ class _Extractor:
                 self.module_body(getattr(node, "orelse", []), top=False)
                 self.module_body(getattr(node, "finalbody", []), top=False)
 
-    # -- classes ---------------------------------------------------------------------
-
     def class_def(self, node: ast.ClassDef) -> None:
         l0, c0, c1 = self.name_pos(node, b"class")
         end_line = (node.end_lineno or node.lineno) - 1
@@ -321,7 +297,6 @@ class _Extractor:
             targets: list[str] = []
             value = None
             if isinstance(stmt, ast.Assign):
-                # also chained assignments: _name = _description = 'x'
                 targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                 value = stmt.value
             elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
@@ -329,7 +304,7 @@ class _Extractor:
             for target in targets:
                 if target[0] != "_" or value is None:
                     continue
-                if isinstance(value, ast.Name) and value.id in meta:  # _inherit = _name
+                if isinstance(value, ast.Name) and value.id in meta:
                     meta[target] = meta[value.id]
                     meta_nodes[target] = meta_nodes[value.id]
                     continue
@@ -380,7 +355,6 @@ class _Extractor:
                 if value is None:
                     continue
                 if len(targets) == 1 and _is_locals_subscript(targets[0]) and model_info is not None:
-                    # locals()['global'] = fields.Boolean(...): a field named by a keyword
                     ftype = self.field_type(value)
                     key = targets[0].slice  # type: ignore[attr-defined]
                     if ftype is not None:
@@ -447,7 +421,7 @@ class _Extractor:
         return None
 
     def field(self, target: ast.AST, stmt: ast.stmt, call: ast.Call, ftype: str, cls_model: str | None) -> tuple:
-        if isinstance(target, ast.Constant):  # locals()['name']: position of the name's content
+        if isinstance(target, ast.Constant):
             span = self.s.string_span(target)
             l0, c0, c1 = span if span is not None else self.node_pos(target)
             fname = target.value
@@ -475,7 +449,6 @@ class _Extractor:
             comodel = _str(cm)
             if comodel and isinstance(cm, ast.Constant):
                 self.ref_str(REF_MODEL, cm, ("comodel",))
-        # string references held by field arguments
         rel = arg_nodes.get("related")
         if isinstance(rel, ast.Constant) and isinstance(rel.value, str):
             self.ref_str(REF_FIELD, rel, ("related", cls_model))
@@ -522,7 +495,7 @@ class _Extractor:
                     if isinstance(a, ast.Constant) and isinstance(a.value, str):
                         args.append(a.value)
                     elif isinstance(a, (ast.List, ast.Tuple)) and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in a.elts):
-                        args.extend(e.value for e in a.elts)  # @route(['/a', '/b'])
+                        args.extend(e.value for e in a.elts)
                     else:
                         args.append("?")
                 decorators.append((name, tuple(args)))
@@ -537,13 +510,12 @@ class _Extractor:
         end_line = (node.end_lineno or node.lineno) - 1
         params = self.params(node, l0)
         body_src = b"\n".join(self.s.lines[l0 : end_line + 1])
-        # super() reaching THIS method (not super().other_method(), not a comment's "super(")
+        # super() reaching this same method only, not super().other_method()
         calls_super = b"super(" in body_src and re.search(rb"super\s*\([^)]*\)\s*\.\s*" + re.escape(node.name.encode()) + rb"\b", body_src) is not None
         returns = self.s.segment(node.returns, 80) if node.returns is not None else None
         return (node.name, l0, c0, c1, end_line, tuple(decorators), params, calls_super, _doc(node), returns)
 
     def params(self, node: ast.AST, l0: int) -> str:
-        """Parameter list text between the parentheses of a def header."""
         lines = self.s.lines
         last = node.body[0].lineno - 1 if node.body else l0  # type: ignore[attr-defined]
         start = lines[l0].find(b"(", node.col_offset)  # type: ignore[attr-defined]
@@ -563,15 +535,13 @@ class _Extractor:
                     depth -= 1
                     if depth == 0:
                         chunks.append(line[seg:j])
-                        text = b" ".join(c.strip() for c in chunks)[1:]  # drop the opening "("
+                        text = b" ".join(c.strip() for c in chunks)[1:]
                         return " ".join(text.decode("utf-8", "replace").split())[:200]
                 j += 1
             chunks.append(line[seg:])
             i += 1
             j = 0
         return ""
-
-    # -- regex refs in bodies ------------------------------------------------------------
 
     def class_model_at(self, line0: int) -> str | None:
         for start, end, model in self.class_ranges:
@@ -584,6 +554,7 @@ class _Extractor:
         b1 = b0 + (end - start)
         self.refs.append((kind, sys.intern(value), l0, self.s.col(l0, b0), self.s.col(l0, b1), ctx))
 
+    # body refs: literal-prefix byte regexes only (others cost as much as parsing); field paths: query time
     def regex_refs(self) -> None:
         src = self.s.src
         if b"env[" in src or b"env [" in src:
@@ -610,9 +581,6 @@ class _Extractor:
                         pos += len(part) + 1
                 else:
                     self.add_regex_ref(REF_XMLID, value, m.start("v"), m.end("v"), (role,))
-        # Field-path strings in method bodies (mapped('a.b'), domain tuples...) are
-        # not indexed: patterns without a literal prefix cost as much as parsing.
-        # Query-time analysis finds them precisely on the few candidate files.
 
 
 RX_ENV = re.compile(rb"""env\s*\[\s*(['"])([a-z0-9_]+(?:\.[a-z0-9_]+)+)\1\s*\]""")
@@ -640,7 +608,6 @@ def _is_locals_subscript(node: ast.AST) -> bool:
 
 
 def _small(v) -> bool:
-    """Keep literal values small in facts (big selection lists are fine, blobs are not)."""
     if isinstance(v, str):
         return len(v) <= 400
     if isinstance(v, (list, dict)):
@@ -675,12 +642,8 @@ def _indent_width(raw: bytes) -> int:
     return len(raw[: len(raw) - len(raw.lstrip(b" \t"))].expandtabs(8))
 
 
+# (tree, None) | (repaired tree|None, first error (msg, line0, col0)); repairs keep line numbers
 def parse_tolerant(src: bytes, path: str = "<unknown>") -> tuple[ast.Module | None, tuple | None]:
-    """``(tree, error)``: the AST of ``src`` and None, or on a syntax error the
-    first error ``(message, line0, col0)`` and the AST of ``src`` with the
-    offending lines neutralised - replaced by ``pass`` (``if 1:`` when they head
-    an indented block) or blanked, line numbers and the other lines untouched -
-    so that a mid-edit buffer keeps its structure (None when beyond repair)."""
     try:
         return _strict_parse(src, path), None
     except SyntaxError as exc:
@@ -702,7 +665,7 @@ def parse_tolerant(src: bytes, path: str = "<unknown>") -> tuple[ast.Module | No
             break
         raw = lines[ln]
         width = _indent_width(raw)
-        if "unexpected indent" in msg:  # blank the line and the block it starts
+        if "unexpected indent" in msg:
             lines[ln] = b""
             for j in range(ln + 1, len(lines)):
                 r = lines[j]

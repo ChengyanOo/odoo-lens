@@ -1,12 +1,3 @@
-"""Benchmark the real server over stdio, the way Claude Code drives it.
-
-    python3.12 scripts/bench.py [--versions 16.0,18.0,20.0] [--worktrees ~/odev/worktrees] [--cold]
-
-For each version: spawn bin/odoo-lens with the checkout as workspace, measure
-initialize, the first request (includes loading/building the index), then the
-latency of each operation on well-known positions, and the server RSS.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -20,7 +11,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from lsp_client import LspClient, path_to_uri  # noqa: E402
 
-# (label, operation, relative file, needle, column offset inside the needle)
 PROBES = [
     ("hover field", "textDocument/hover", "odoo/addons/sale/models/sale_order.py", "partner_id = fields.Many2one", 2),
     ("definition _inherit", "textDocument/definition", "odoo/addons/sale_stock/models/sale_order.py", "_inherit = 'sale.order'", 14),

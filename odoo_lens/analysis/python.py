@@ -1,28 +1,3 @@
-"""Odoo-aware Python analysis: the targets under the cursor, the usages of a
-member in a file, the method calls of a function.
-
-One file is analysed on demand from its current source (``ast``) on top of the
-env's :class:`~odoo_lens.registry.Registry`. Parsed files and their analyses live
-in a small LRU keyed by ``(path, len(source), hash(source))``.
-
-Receiver inference is local to a function and essentially flow-insensitive: the
-type of a name is the union of the types of its bindings (assignments, loop and
-comprehension targets, parameters), narrowed to the bindings that can reach the
-use (straight-line order, loop-carried ones included; a dominating last binding
-wins). Expressions are typed lazily, memoized and depth-limited - no fixpoints.
-Method calls are typed from ``-> ...`` annotations or the ``return`` statements
-of the called definition (parsing just that method). Type values are tuples:
-
-* ``("rs", models)``: recordset of a model (several models = candidates)
-* ``("env",)``: an ``odoo.api.Environment``; ``("req",)``: ``odoo.http.request``
-* ``("super", class_info)``: ``super()`` inside a class
-* ``("vals", model)``: a dict of field values of ``model`` (create/write...)
-* ``("list", elem)``, ``("tuple", items)``, ``("dict", key, value)``: containers
-* ``("mod", dotted)``, ``("cls" | "inst" | "func", path, name)``: python objects
-* ``("val", what)``: a scalar; ``("obj",)``: any other non-record object
-* ``None``: unknown (could be a recordset of any model)
-"""
-
 from __future__ import annotations
 
 import ast
@@ -96,21 +71,16 @@ from ..extract.pyfacts import FRAMEWORK_CLASSES, MODEL_BASES, parse_tolerant
 from ..registry import MAGIC_FIELDS, model_class_info
 from .targets import ATTR, FIELD, FILE, METHOD, MODEL, MODULE, PYSYM, TEMPLATE, XMLID, Target
 
-# ---------------------------------------------------------------------------
-# Odoo knowledge
 
-# methods returning a recordset of the receiver's model (``-> Self`` in 18+)
 PRESERVING = frozenset({
     "browse", "search", "create", "copy", "sudo", "with_context", "with_user", "with_company",
     "with_env", "with_prefetch", "exists", "filtered", "filtered_domain", "sorted", "ensure_one",
     "new", "union", "concat", "search_fetch", "try_lock_for_update", "_filtered_access",
     "_fetch_query", "_browse",
 })
-# lambdas passed to these recordset methods receive a record of the receiver
 LAMBDA_METHODS = frozenset({"filtered", "sorted", "mapped", "grouped"})
-# recordset methods whose first argument is a field path string
 PATH_METHODS = frozenset({"mapped", "filtered", "grouped", "sorted"})
-# domain consumers: method -> positional index of the domain argument
+# method -> positional index of its domain argument (-1: keyword only)
 DOMAIN_ARGS = {
     "search": 0, "search_count": 0, "search_read": 0, "search_fetch": 0, "_search": 0,
     "filtered_domain": 0, "read_group": 0, "_read_group": 0, "formatted_read_group": 0,
@@ -120,13 +90,11 @@ DOMAIN_ARGS = {
     "search_panel_select_multi_range": -1,
 }
 DOMAIN_KWARGS = frozenset({"domain", "args"})
-# operators of a domain leaf ``(path, operator, value)``, all versions
 LEAF_OPERATORS = frozenset({
     "=", "!=", "<>", "==", "<", ">", "<=", ">=", "=?", "like", "ilike", "=like", "=ilike",
     "not like", "not ilike", "not =like", "not =ilike", "in", "not in", "child_of", "parent_of",
     "any", "not any", "any!", "not any!",
 })
-# field-name arguments (strings or lists of strings): method -> (positions, keywords)
 FIELD_ARGS = {
     "read": ((0,), ("fields",)),
     "search_read": ((1,), ("fields",)),
@@ -145,7 +113,6 @@ FIELD_ARGS = {
     "web_read_group": ((1, 2), ("fields", "groupby", "aggregates")),
 }
 ORDER_KWARGS = frozenset({"order", "orderby"})
-# methods taking a dict of field values: method -> (position, keywords)
 VALS_ARGS = {
     "create": (0, ("vals_list", "vals")),
     "write": (0, ("vals",)),
@@ -155,24 +122,19 @@ VALS_ARGS = {
     "copy_data": (0, ("default",)),
     "_add_missing_default_values": (0, ("values",)),
 }
-# Command.create(vals) / Command.update(id, vals): position of the values dict
 COMMAND_VALS = {"create": 0, "update": 1}
-# containers / combinators a domain flows through unchanged
 DOMAIN_WRAPPERS = frozenset({
     "AND", "OR", "normalize_domain", "Domain", "distribute_not", "list", "optimize",
     "optimize_full", "_optimize", "TRUE", "FALSE", "domain_combine_anies",
 })
-# container mutations giving the element type of an initially empty list / set
 FILL_METHODS = frozenset({"append", "add", "extend", "insert"})
-# parameters holding field values in ORM method overrides: method -> parameter index
 VALS_PARAMS = {"create": 1, "write": 1, "copy": 1, "copy_data": 1, "new": 1, "update": 1, "_add_missing_default_values": 1}
 ENV_MODELS = {"user": "res.users", "company": "res.company", "companies": "res.company", "website": "website"}
 RELATIONAL = frozenset({"Many2one", "One2many", "Many2many"})
-FIELDS_MODULES = ("fields", "odoo.fields", "openerp.fields")  # receivers of fields.X(...) declarations
-# recordset attributes that exist on every model without being declared in facts
+FIELDS_MODULES = ("fields", "odoo.fields", "openerp.fields")
 RS_SLOTS = frozenset({"env", "_ids", "_prefetch_ids", "_fields", "pool"})
 FRAMEWORK_FILES = ("odoo/models.py", "odoo/orm/models.py", "odoo/orm/models_transient.py", "odoo/orm/models_cached.py")
-# odoo 19+: names assigned on the ``odoo`` namespace package by odoo/init.py
+# saas-18.3+: names assigned on the `odoo` namespace package by odoo/init.py
 ODOO_INIT_NAMES = {
     "_": ("odoo.tools.translate", "_"),
     "_lt": ("odoo.tools.translate", "_lt"),
@@ -180,8 +142,7 @@ ODOO_INIT_NAMES = {
     "SUPERUSER_ID": ("odoo.orm.utils", "SUPERUSER_ID"),
 }
 BUILTINS = frozenset(dir(builtins))
-# attribute names of builtin containers, strings, dates, files, loggers, cursors...:
-# an unknown receiver accessing them is most likely not a recordset
+# builtin/date/file/logger/cursor attrs: an unknown receiver using them is likely no recordset
 NON_MODEL_ATTRS = frozenset(
     {n for t in (dict, list, str, set, bytes, int, float, tuple, frozenset) for n in dir(t) if not n.startswith("_") and n != "title"}
     | {
@@ -198,12 +159,12 @@ NON_MODEL_ATTRS = frozenset(
 )
 MAX_NAME_HOPS = 8
 MAX_DEPTH = 60
-MAX_STEPS = 50000  # inference steps per public call (safety net for pathological code)
+MAX_STEPS = 50000  # inference steps per public call (an.reset_budget())
 MAX_DECLARING = 40  # unknown receivers: members declared by more models are not guessed
-LENIENCY = 25  # columns searched around an imprecise cursor
-PARTIAL_MIN_LINES = 2500  # bigger files are analysed one method at a time when possible...
-PARTIAL_MAX_USES = 4  # ... for their first requests, then parsed entirely
-MAX_CANDIDATES = 8  # ambiguous receivers: at most this many candidate models
+LENIENCY = 25  # UTF-16 columns searched around Claude's imprecise cursor
+PARTIAL_MIN_LINES = 2500  # bigger files: parse just the cursor's method, PARTIAL_MAX_USES times
+PARTIAL_MAX_USES = 4
+MAX_CANDIDATES = 8
 
 _FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 _COMP = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -217,15 +178,15 @@ _MODEL_RX = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)+")
 _CAMEL = re.compile(r"(?<=[^_])([A-Z])")
 _FROM_RX = re.compile(rb"^\s*from\s+(\.*)\s*([\w.]*)\s+import\b")
 
+# types: ("rs", models) | ("env",) | ("req",) | ("envref",) | ("super", _ClassInfo) | ("vals", model)
+# | ("list", elem) | ("tuple", items) | ("dict", key, value, None | (analyzer, unit, entries, substs))
+# | ("mod", dotted) | ("cls" | "inst" | "func", path, name) | ("method", models, name)
+# | ("model_name", model) | ("builtin", name) | ("val", what) | ("obj",) | None: unknown, any model
 ENV = ("env",)
 REQ = ("req",)
 OBJ = ("obj",)
 VAL = ("val", None)
 INDEXED = ("<indexed>",)  # domain of a field definition: covered by the facts refs
-
-
-# ---------------------------------------------------------------------------
-# type helpers
 
 
 def _rs(models: Any) -> tuple | None:
@@ -234,7 +195,6 @@ def _rs(models: Any) -> tuple | None:
 
 
 def _union(types: Any) -> tuple | None:
-    """Flow-insensitive merge: recordsets win over anything else; unknowns are ignored."""
     models: list[str] = []
     other = None
     for t in types:
@@ -257,9 +217,6 @@ def _union(types: Any) -> tuple | None:
 
 
 def _homogeneous(types: Any, strict: bool = False) -> tuple | None:
-    """Element type of a literal container: recordsets mixed with other known
-    values (``{'move': self, 'lines': []}``) give no element type; ``strict``:
-    neither do unknown values."""
     types = list(types)
     if strict and any(t is None for t in types):
         return None
@@ -270,8 +227,6 @@ def _homogeneous(types: Any, strict: bool = False) -> tuple | None:
 
 
 def _subst(t: tuple | None, src: str, dst: str) -> tuple | None:
-    """Replace recordsets of ``src`` by recordsets of ``dst`` (the type of values
-    computed by a method of model ``src`` called on a model ``dst`` inheriting it)."""
     if t is None:
         return None
     k = t[0]
@@ -292,7 +247,6 @@ def _subst(t: tuple | None, src: str, dst: str) -> tuple | None:
 
 
 def _entry(t: tuple, key: str) -> tuple | None:
-    """Type of ``d[key]`` for a dict type built from a literal."""
     an, eu, entries, substs = t[3]
     if key not in entries:
         return None
@@ -303,7 +257,6 @@ def _entry(t: tuple, key: str) -> tuple | None:
 
 
 def _elem(t: tuple | None) -> tuple | None:
-    """Type of the items obtained by iterating over a value of type ``t``."""
     if t is None:
         return None
     k = t[0]
@@ -319,7 +272,6 @@ def _elem(t: tuple | None) -> tuple | None:
 
 
 def _item(t: tuple | None, i: int) -> tuple | None:
-    """Type of the i-th item when unpacking a value of type ``t``."""
     if t is None:
         return None
     k = t[0]
@@ -344,7 +296,6 @@ def _dotted(node: ast.AST) -> str | None:
 
 
 def _start(node: ast.AST) -> int:
-    """First line (1-based) of a statement, decorators included."""
     decs = getattr(node, "decorator_list", None)
     if decs:
         return min(node.lineno, decs[0].lineno)  # type: ignore[attr-defined]
@@ -388,39 +339,26 @@ def _bound_name(alias: ast.alias, stmt: ast.AST) -> str:
 
 
 def _parse(source: bytes) -> ast.Module | None:
-    """AST of ``source``, of its repaired text on a syntax error (see :func:`parse_tolerant`)."""
     return parse_tolerant(source)[0]
 
 
-# ---------------------------------------------------------------------------
-# per-file structures
-
-
 class _ClassInfo:
-    """A class of the analysed file (top-level ones in facts CLASSES order)."""
-
     __slots__ = ("node", "index", "name", "model", "is_model", "facts")
 
     def __init__(self, node: ast.ClassDef, index: int, facts: tuple | None = None):
         self.node = node
-        self.index = index  # index in facts CLASSES (-1 for nested classes)
+        self.index = index  # index in facts CLASSES (-1: nested or stand-in class)
         self.name = facts[K_NAME] if facts is not None else node.name
         self.model: str | None = None
         self.is_model = False
-        self.facts = facts  # Class tuple when only part of the class body is parsed
+        self.facts = facts
 
 
+# name -> [binder]; binder: ("param", arg, index, fn) | ("expr", value, name) | ("with", expr, name)
+# | ("unpack" | "for", value, path, name) | ("aug", value, op, name) | ("ann", annotation, value, name)
+# | ("import", alias, stmt) | ("def", node) | ("gvar" | "cvar", stmt, name) | ("except", handler)
+# | ("global", stmt) | ("unknown", node) | ("fimport" | "fsym", facts tuple); name: bound ast.Name
 class _Scope:
-    """A python scope (module, class body, function, lambda, comprehension)
-    with the bindings of its names: ``name -> [binder]``.
-
-    Binders: ("param", arg, index, fn) | ("expr", value, pos) |
-    ("unpack", value, path, pos) | ("for", iterable, path, pos) |
-    ("aug", value, op, pos) | ("ann", annotation, value, pos) |
-    ("import", alias, stmt) | ("def", node) | ("gvar", stmt, pos) |
-    ("cvar", stmt, pos) | ("except", handler) | ("global", stmt) |
-    ("with", expr, pos) | ("unknown", node)."""
-
     __slots__ = ("node", "kind", "parent", "binders")
 
     def __init__(self, node: ast.AST | None, kind: str, parent: _Scope | None):
@@ -438,31 +376,25 @@ class _Scope:
 
 
 class _Unit:
-    """The analysis unit of a line: the outermost function (method) containing
-    it, or the module / class-level statement. Owns a parent map and the
-    scopes created inside it, and memoizes types."""
-
     __slots__ = ("root", "cls", "header", "base", "parents", "scopes", "memo", "vars", "attrs", "stores", "keys", "loads", "fills")
 
     def __init__(self, root: ast.AST, cls: _ClassInfo | None, header: bool, base: _Scope):
         self.root = root
-        self.cls = cls  # class context of the root (None at module level)
-        self.header = header  # class header only (decorators, bases, keywords)
-        self.base = base  # scope the root statement lives in
+        self.cls = cls
+        self.header = header
+        self.base = base
         self.parents: dict[ast.AST, ast.AST] = {}
         self.scopes: dict[ast.AST, _Scope] = {}
         self.memo: dict[int, Any] = {}
         self.vars: dict[tuple, Any] = {}
         self.attrs: list[ast.Attribute] = []
-        self.stores: dict[tuple[str, str], list[ast.AST]] = {}  # (name, key) -> values of name['key'] = value
-        self.keys: dict[str, list[ast.AST]] = {}  # name -> computed keys k of name[k] = v / name[k].append(v)
-        self.loads: dict[str, list[ast.Name]] = {}  # name -> Name nodes reading it
-        self.fills: dict[str, list[ast.Call]] = {}  # name -> name.append/add/extend/insert(...) calls
+        self.stores: dict[tuple[str, str], list[ast.AST]] = {}
+        self.keys: dict[str, list[ast.AST]] = {}
+        self.loads: dict[str, list[ast.Name]] = {}
+        self.fills: dict[str, list[ast.Call]] = {}
 
 
 class _File:
-    """A parsed python source and its registry-independent structure."""
-
     def __init__(self, path: str, source: bytes, tree: ast.Module | None = None, lines: list[bytes] | None = None, partial: bool = False):
         self.path = path
         self.source = source
@@ -478,11 +410,9 @@ class _File:
         self.analyzer: _Analyzer | None = None
         self._nl: list[int] | None = None
         self._assigns: dict[ast.AST, dict[str, list[tuple[ast.AST, ast.AST | None, ast.Attribute]]]] = {}
-        self.starts: dict[int, list[int]] = {}  # id(statement list) -> start lines (see _stmt_at)
+        self.starts: dict[int, list[int]] = {}
         if self.tree is not None:
             self._collect_module(self.tree.body)
-
-    # -- structure ------------------------------------------------------------
 
     def _collect_module(self, body: list[ast.stmt]) -> None:
         scope = self.module_scope
@@ -521,7 +451,6 @@ class _File:
                 ci.is_model = bool(ci.facts[K_MODEL])
 
     def facts_module_scope(self, facts: dict) -> None:
-        """Module scope from the facts (partial parses)."""
         scope = self.module_scope = _Scope(self.tree, "module", None)
         for imp in facts.get(IMPORTS) or ():
             if imp[I_NAME] != "*":
@@ -549,9 +478,6 @@ class _File:
         return s
 
     def instance_assigns(self, ci: _ClassInfo) -> dict[str, list[tuple[ast.AST, ast.AST | None, ast.Attribute]]]:
-        """``attr -> [(method, value, target)]`` for ``self.attr = value`` /
-        ``cls.attr = value`` statements in the methods of a class (value None
-        when assigned by tuple unpacking)."""
         out = self._assigns.get(ci.node)
         if out is not None:
             return out
@@ -562,7 +488,7 @@ class _File:
             params = stmt.args.posonlyargs + stmt.args.args
             if not params:
                 continue
-            # ``__new__`` builds the instance itself: ``self = object.__new__(cls)``
+            # __new__ builds the instance itself: self = object.__new__(cls)
             firsts = {params[0].arg, "self"} if stmt.name == "__new__" else {params[0].arg}
             for n in ast.walk(stmt):
                 if isinstance(n, ast.Assign):
@@ -574,7 +500,7 @@ class _File:
                 for t in targets:
                     if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id in firsts:
                         out.setdefault(t.attr, []).append((stmt, value, t))
-                    elif isinstance(t, (ast.Tuple, ast.List)):  # self.a, self.b = ...
+                    elif isinstance(t, (ast.Tuple, ast.List)):
                         for e in t.elts:
                             if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id in firsts:
                                 out.setdefault(e.attr, []).append((stmt, None, e))
@@ -588,18 +514,15 @@ class _File:
             ]
         return bisect_left(self._nl, offset)
 
+    # UTF-8 byte column (ast) -> UTF-16 column (LSP) on 0-based line0
     def u16(self, line0: int, bcol: int) -> int:
-        """UTF-8 byte column -> UTF-16 column on ``line0``."""
         try:
             b = self.lines[line0]
         except IndexError:
             return max(bcol, 0)
         return bytecol_to_utf16(b, bcol)
 
-    # -- units ------------------------------------------------------------------
-
     def locate(self, line0: int) -> tuple[ast.AST | None, _ClassInfo | None, bool]:
-        """(unit root, class context, header-only) for a 0-based line."""
         if self.tree is None:
             return None, None, False
         lineno = line0 + 1
@@ -643,8 +566,6 @@ class _File:
         return u
 
     def _build_unit(self, root: ast.AST, ci: _ClassInfo | None, header: bool) -> _Unit:
-        """One walk over the unit: parent map, scopes and their bindings, plus
-        indexes of attributes, loaded names, subscript stores and container fills."""
         if ci is not None and not header:
             base = self.class_scope(ci)
         else:
@@ -717,14 +638,13 @@ class _File:
                     elif kind == "comp":
                         for gen in child.generators:  # type: ignore[attr-defined]
                             _bind_for(cs, gen.target, gen.iter, ())
-                    elif scope is not base:  # nested class
+                    elif scope is not base:
                         scope.add(child.name, ("def", child))  # type: ignore[attr-defined]
                     stack.append((child, cs))
         return u
 
 
 def _index_fill(u: _Unit, node: ast.Call) -> None:
-    """Record ``x.append(...)`` / ``d[k].append(...)`` / ``d.setdefault(k, []).append(...)``."""
     func = node.func
     if type(func) is not ast.Attribute or func.attr not in FILL_METHODS:
         return
@@ -741,9 +661,8 @@ def _index_fill(u: _Unit, node: ast.Call) -> None:
             u.keys.setdefault(target.func.value.id, []).append(target.args[0])  # type: ignore[attr-defined]
 
 
+# starts: start lines of long bodies keyed by id() (safe: the bodies live as long as the file)
 def _stmt_at(body: list[ast.stmt], lineno: int, starts: dict[int, list[int]]) -> ast.stmt | None:
-    """The statement of ``body`` spanning 1-based ``lineno`` (decorators included);
-    ``starts`` caches the start lines of long bodies (by id: they belong to the file)."""
     if len(body) < 16:
         for stmt in body:
             if _start(stmt) <= lineno <= (stmt.end_lineno or stmt.lineno):
@@ -758,10 +677,8 @@ def _stmt_at(body: list[ast.stmt], lineno: int, starts: dict[int, list[int]]) ->
     return None
 
 
+# framework classes (BaseModel & co) are analysed as model 'base', whose MRO ends with them
 def _class_model(node: ast.ClassDef, major: int | None, framework: bool) -> tuple[str | None, bool]:
-    """(model, is_model_class) like the facts extractor + ``model_class_info``.
-    The framework classes (BaseModel & co) are analysed as the ``base`` model,
-    whose MRO ends with them."""
     if framework and node.name in FRAMEWORK_CLASSES:
         return "base", True
     meta: dict[str, Any] = {}
@@ -828,7 +745,7 @@ def _bind_target(scope: _Scope, target: ast.AST, value: ast.AST | None, path: tu
             for i, t in enumerate(elts):
                 if isinstance(t, ast.Starred):
                     _bind_target(scope, t.value, None, ())
-                else:  # items after a starred target are counted from the end
+                else:
                     _bind_target(scope, t, value, path + (i if star is None or i < star else i - len(elts),))
     elif isinstance(target, ast.Starred):
         _bind_target(scope, target.value, None, ())
@@ -854,7 +771,6 @@ _BINDING_TYPES = frozenset(
 
 
 def _bind_node(node: ast.AST, scope: _Scope) -> None:
-    """Record the name bindings made by ``node`` (a statement or expression) in ``scope``."""
     if isinstance(node, ast.Assign):
         for t in node.targets:
             _bind_target(scope, t, node.value, ())
@@ -893,7 +809,6 @@ def _bind_node(node: ast.AST, scope: _Scope) -> None:
 
 
 def _same_frame(scope: _Scope, s: _Scope) -> bool:
-    """``scope`` is ``s`` or nested in it through lambdas / comprehensions only."""
     x: _Scope | None = scope
     while x is not None and x is not s:
         if x.kind not in ("comp", "lambda"):
@@ -919,7 +834,6 @@ def _binder_order(b: tuple) -> tuple[int, int]:
 
 
 def _binder_stmt(b: tuple, parents: dict) -> ast.AST | None:
-    """The statement (or walrus) performing the binding."""
     k = b[0]
     if k == "param":
         return None
@@ -936,7 +850,6 @@ def _binder_stmt(b: tuple, parents: dict) -> ast.AST | None:
 
 
 def _reaches(b: tuple, stmt: ast.AST | None, use: ast.AST, upos: tuple, parents: dict) -> bool:
-    """The binding happens before ``use`` (straight-line order)."""
     if b[0] == "param" or stmt is None:
         return True
     if upos > (stmt.end_lineno, stmt.end_col_offset):  # type: ignore[attr-defined]
@@ -945,7 +858,7 @@ def _reaches(b: tuple, stmt: ast.AST | None, use: ast.AST, upos: tuple, parents:
         n: ast.AST | None = use
         while n is not None:
             p = parents.get(n)
-            if p is stmt:  # in the body, not in the iterable / context expression
+            if p is stmt:
                 return isinstance(n, ast.stmt)
             n = p
     return False
@@ -971,8 +884,6 @@ def _enclosing_loops(node: ast.AST, parents: dict) -> list[ast.AST]:
 
 
 def _dominates(stmt: ast.AST, use: ast.AST, parents: dict) -> bool:
-    """``stmt`` runs before ``use`` on every path: ``use`` is inside it or after
-    it in the same block."""
     if isinstance(stmt, ast.NamedExpr):
         n = parents.get(stmt)
         while n is not None and not isinstance(n, ast.stmt):
@@ -1007,8 +918,6 @@ def _index(lst: list, node: ast.AST) -> int:
 
 
 def _lookup(scope: _Scope | None, name: str) -> tuple[_Scope | None, list[tuple] | None]:
-    """Python name resolution (LEGB without builtins): class bodies are only
-    visible from the class body itself."""
     s = scope
     first = True
     while s is not None:
@@ -1029,9 +938,6 @@ def _lookup(scope: _Scope | None, name: str) -> tuple[_Scope | None, list[tuple]
     return None, None
 
 
-# ---------------------------------------------------------------------------
-# file cache
-
 _LRU_SIZE = 32
 _FILES: OrderedDict[tuple, _File] = OrderedDict()
 _PARTIAL_USES: dict[tuple, int] = {}
@@ -1050,14 +956,12 @@ def _get_file(path: str, source: bytes) -> _File:
     return f
 
 
+# break the _File <-> _Analyzer cycle: refcounting frees the AST now, never pins a registry
 def _drop(f: _File) -> None:
-    """Break the _File <-> _Analyzer cycle of an evicted entry so that refcounting
-    frees its AST right away (and it can never pin a registry)."""
     f.analyzer = None
 
 
 def clear_caches() -> None:
-    """Forget every parsed file and derived cache (e.g. when a registry is evicted)."""
     for f in _FILES.values():
         _drop(f)
     _FILES.clear()
@@ -1078,17 +982,15 @@ def _file_for_path(path: str) -> _File | None:
 
 
 def _partial_file(path: str, source: bytes, facts: dict | None, line0: int) -> _File | None:
-    """For a big file, a _File holding only the method (of a model class) that
-    contains ``line0``, delimited with the facts; None when not applicable."""
     if not facts or source.count(b"\n") < PARTIAL_MIN_LINES:
         return None
     full = (path, len(source), hash(source))
     if full in _FILES:
-        return None  # already fully parsed
+        return None
     _PARTIAL_USES[full] = n = _PARTIAL_USES.get(full, 0) + 1
     if n > PARTIAL_MAX_USES:
         _PARTIAL_USES.pop(full, None)
-        return None  # used a lot: parse it all once
+        return None
     if len(_PARTIAL_USES) > 256:
         _PARTIAL_USES.clear()
     for idx, cls in enumerate(facts.get(CLASSES) or ()):
@@ -1127,7 +1029,7 @@ def _method_file(path: str, source: bytes, facts: dict, idx: int, cls: tuple, m:
     fake = tree.body[0]
     fn = fake.body[-1] if fake.body else None
     if not isinstance(fn, _FUNC) or fn.name != m[M_NAME] or fn.lineno - 1 != m[M_LINE]:
-        return None  # facts out of sync with the source
+        return None
     f = _File(path, source, tree, lines, partial=True)
     f.facts_module_scope(facts)
     ci = _ClassInfo(fake, idx, cls)
@@ -1136,13 +1038,11 @@ def _method_file(path: str, source: bytes, facts: dict, idx: int, cls: tuple, m:
     return f
 
 
-_CURRENT: list = [None, -1]  # weak reference to the registry the caches belong to, its generation
+_CURRENT: list = [None, -1]
 
 
+# caches never keep a replaced registry alive; parsed files and units are registry-independent
 def _use_registry(registry: Any) -> None:
-    """Drop every registry-derived result when the registry (or its generation)
-    changes: caches never keep a replaced registry alive. Parsed files and their
-    units are registry-independent and kept."""
     ref = _CURRENT[0]
     if ref is not None and ref() is registry and _CURRENT[1] == registry.generation:
         return
@@ -1160,8 +1060,6 @@ def _use_registry(registry: Any) -> None:
 
 
 def _analyzer(registry: Any, path: str, source: bytes, facts: dict | None = None, line0: int | None = None) -> _Analyzer:
-    """Analyzer of ``source``; with facts and a line, possibly over a partial
-    parse of the method containing the line (big files)."""
     f = _partial_file(path, source, facts, line0) if line0 is not None else None
     if f is None:
         f = _get_file(path, source)
@@ -1176,15 +1074,11 @@ def _analyzer(registry: Any, path: str, source: bytes, facts: dict | None = None
     return an
 
 
-# ---------------------------------------------------------------------------
-# python symbols (imports, re-exports) - memoized for the current registry
-
 _SYM_CACHE: dict[tuple, Any] = {}
 MAX_HOPS = 6
 
 
 def _abs_module(reg: Any, path: str, module: str, level: int) -> str | None:
-    """Absolute dotted name of ``from <level dots><module> import`` in ``path``."""
     if not level:
         return module
     dotted = reg.py_dotted_name(path)
@@ -1203,15 +1097,14 @@ def _module_sym(reg: Any, dotted: str) -> tuple | None:
     return ("module", dotted, path)
 
 
+# -> ("sym", path, name, kind, line, col, end_col) | ("module", dotted, path) | None
 def _resolve_symbol(reg: Any, dotted: str, name: str, depth: int = 0) -> tuple | None:
-    """Where ``name`` imported from python module ``dotted`` is defined, following
-    re-exports. ("sym", path, name, kind, line, col, end_col) | ("module", dotted, path)."""
     key = (dotted, name)
     if key in _SYM_CACHE:
         return _SYM_CACHE[key]
     if len(_SYM_CACHE) > 20000:
         _SYM_CACHE.clear()
-    _SYM_CACHE[key] = None  # cycle guard
+    _SYM_CACHE[key] = None
     res = _resolve_symbol_uncached(reg, dotted, name, depth)
     _SYM_CACHE[key] = res
     return res
@@ -1245,7 +1138,7 @@ def _resolve_symbol_uncached(reg: Any, dotted: str, name: str, depth: int) -> tu
         if iname == "*":
             stars.append(imp)
             continue
-        if iname is None:  # import a.b.c [as x]
+        if iname is None:
             if imp[I_ASNAME] == name:
                 return _module_sym(reg, imp[I_MODULE])
             if not imp[I_ASNAME] and imp[I_MODULE].split(".")[0] == name:
@@ -1289,8 +1182,6 @@ def _class_facts(reg: Any, path: str, name: str) -> tuple | None:
 
 
 def _resolve_in_file(reg: Any, path: str, dotted: str, depth: int = 0) -> tuple | None:
-    """Resolve a dotted expression (e.g. a base class ``portal.CustomerPortal``)
-    written at module level in ``path``."""
     first, _, rest = dotted.partition(".")
     dotted_mod = reg.py_dotted_name(path)
     sym = _resolve_symbol(reg, dotted_mod, first, depth + 1) if dotted_mod else None
@@ -1307,8 +1198,6 @@ def _resolve_in_file(reg: Any, path: str, dotted: str, depth: int = 0) -> tuple 
 
 
 def _class_member(reg: Any, path: str, clsname: str, attr: str, depth: int = 0) -> tuple | None:
-    """A method / class attribute of python class ``clsname`` defined in ``path``,
-    searched through its python bases."""
     if depth > MAX_HOPS:
         return None
     key = ("member", path, clsname, attr)
@@ -1345,13 +1234,7 @@ def _class_member(reg: Any, path: str, clsname: str, attr: str, depth: int = 0) 
     return res
 
 
-# ---------------------------------------------------------------------------
-# the analyzer
-
-
 class _Analyzer:
-    """Inference over one :class:`_File` with one registry (generation)."""
-
     def __init__(self, f: _File, reg: Any):
         self.f = f
         self.reg = reg
@@ -1364,14 +1247,14 @@ class _Analyzer:
         self.dotted = reg.py_dotted_name(f.path)
         self.minor = version.minor if version is not None else 0
         f.set_major(self.major)
-        self._members: dict[tuple, Any] = {}  # (model, name) -> (kind, definitions)
+        self._members: dict[tuple, Any] = {}
         self._comodels: dict[tuple, str | None] = {}
         self._lineages: dict[str, set[str]] = {}
-        self._insts: dict[tuple, Any] = {}  # (path, class, attr) -> type
+        self._insts: dict[tuple, Any] = {}
         self._gvars: dict[tuple, Any] = {}
         self._depth = 0
         self._hops = 0
-        self._cuts = 0  # bumped whenever a depth limit truncates an inference
+        self._cuts = 0
         self._steps = 0
         self._rank_info: tuple | None = None
         self._search_methods: dict[str, frozenset[str]] = {}
@@ -1379,11 +1262,7 @@ class _Analyzer:
     def reset_budget(self) -> None:
         self._steps = 0
 
-    # -- registry helpers ---------------------------------------------------
-
     def member(self, model: str, name: str) -> tuple[str | None, list]:
-        """(kind, definitions) of member ``name`` of ``model``: scoped lookup first,
-        then the whole env."""
         key = (model, name)
         hit = self._members.get(key)
         if hit is not None:
@@ -1407,8 +1286,6 @@ class _Analyzer:
         return res
 
     def comodel(self, model: str, name: str, _depth: int = 0) -> str | None:
-        """Comodel of a relational field, following ``related=`` paths when the
-        field does not declare one (``company_id = fields.Many2one(related=...)``)."""
         key = (model, name)
         if key in self._comodels:
             return self._comodels[key]
@@ -1435,7 +1312,6 @@ class _Analyzer:
         return self.reg.has_model(model, self.scope) or (self.scope is not None and self.reg.has_model(model))
 
     def field_type(self, model: str, name: str) -> tuple | None:
-        """Type of ``record.name`` for a field (None when not a field)."""
         kind, defs = self.member(model, name)
         if kind != "field":
             return None
@@ -1448,8 +1324,6 @@ class _Analyzer:
         return ("val", ftype)
 
     def walk(self, model: str, path: str) -> list[tuple[str, str | None, list]]:
-        """Like ``registry.walk_path`` (segment, owner, definitions), each segment
-        looked up scoped then unscoped, comodels following ``related=``."""
         out: list[tuple[str, str | None, list]] = []
         cur: str | None = model
         for seg in path.split("."):
@@ -1465,7 +1339,6 @@ class _Analyzer:
         return out
 
     def path_type(self, models: tuple, path: str) -> tuple | None:
-        """Type of ``records.mapped(path)``."""
         out: list[str] = []
         for m in models:
             res = self.walk(m, path)
@@ -1484,8 +1357,6 @@ class _Analyzer:
         recs = self.reg.records(xmlid)
         return recs[0].model if recs else None
 
-    # -- scopes ---------------------------------------------------------------
-
     def scope_of(self, node: ast.AST, u: _Unit) -> _Scope:
         parents = u.parents
         scopes = u.scopes
@@ -1499,7 +1370,6 @@ class _Analyzer:
         return s if s is not None else u.base
 
     def class_of_function(self, fn: ast.AST, u: _Unit) -> _ClassInfo | None:
-        """Class whose method ``fn`` is (None for plain functions / lambdas)."""
         if fn is u.root:
             return u.cls
         parent = u.parents.get(fn)
@@ -1512,7 +1382,6 @@ class _Analyzer:
         return None
 
     def enclosing_method(self, node: ast.AST, u: _Unit) -> tuple[ast.AST | None, _ClassInfo | None]:
-        """Innermost def containing ``node`` that is a method, with its class."""
         n: ast.AST | None = node
         while n is not None:
             if isinstance(n, _FUNC):
@@ -1521,8 +1390,6 @@ class _Analyzer:
                     return n, ci
             n = u.parents.get(n)
         return None, u.cls
-
-    # -- inference --------------------------------------------------------------
 
     def infer(self, node: ast.AST | None, u: _Unit) -> tuple | None:
         if node is None:
@@ -1535,7 +1402,7 @@ class _Analyzer:
         if self._depth > MAX_DEPTH or self._steps > MAX_STEPS:
             self._cuts += 1
             return None
-        memo[key] = None  # cycle guard
+        memo[key] = None
         self._depth += 1
         cuts = self._cuts
         try:
@@ -1543,7 +1410,7 @@ class _Analyzer:
         finally:
             self._depth -= 1
         if self._cuts != cuts:
-            del memo[key]  # truncated by a depth limit: may be complete from a shallower start
+            del memo[key]  # cut by a depth/hop/step limit: may be complete from a shallower start
         else:
             memo[key] = t
         return t
@@ -1605,7 +1472,6 @@ class _Analyzer:
                     entries[key] = v
             keys = _homogeneous(self.infer(k, u) for k in node.keys if k is not None)
             values = _homogeneous((self.infer(v, u) for v in node.values), strict=bool(entries))
-            # per-key values, evaluated lazily by this analyzer in this unit
             return ("dict", keys, values, (self, u, entries, ()) if entries else None)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
             return ("list", self.infer(node.elt, u))
@@ -1635,7 +1501,7 @@ class _Analyzer:
         if self._hops >= MAX_NAME_HOPS:
             self._cuts += 1
             return None
-        cache[key] = None  # cycle guard
+        cache[key] = None
         self._hops += 1
         cuts = self._cuts
         try:
@@ -1649,9 +1515,6 @@ class _Analyzer:
         return t
 
     def reaching(self, binders: list[tuple], use: ast.AST, u: _Unit) -> list[tuple]:
-        """Binders of a function local that may reach ``use``: those before it
-        (the last one alone when it dominates the use) plus loop-carried ones;
-        all of them when none precedes the use."""
         parents = u.parents
         upos = (use.lineno, use.col_offset)  # type: ignore[attr-defined]
         loops = _enclosing_loops(use, parents)
@@ -1724,7 +1587,7 @@ class _Analyzer:
         if k == "fsym":
             sym = b[1]
             return self.sym_type(("sym", self.path, sym[S_NAME], sym[S_KIND], sym[S_LINE], sym[S_COL], sym[S_END_COL]))
-        if k == "with":  # with Form(rec) as f / with f.line_ids.new() as line / .edit(0)
+        if k == "with":
             expr = b[1]
             if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == "edit":
                 t = self.infer(expr.func.value, u)
@@ -1736,14 +1599,12 @@ class _Analyzer:
         return None
 
     def filled_type(self, value: ast.AST, name: str, u: _Unit) -> tuple | None:
-        """Type of a variable initialised with an empty container, from what the
-        function puts into it (``x.append(rec)``, ``x.add((a, b))``, ``d[k] = rec``)."""
         if isinstance(value, ast.Dict) or _call_name(getattr(value, "func", None)) in ("dict", "defaultdict"):
             stored = [self.infer(v, u) for (n, key), vals in u.stores.items() if n == name and key is None for v in vals]
-            if name + "[]" in u.fills:  # d[k].append(x) / d.setdefault(k, []).append(x)
+            if name + "[]" in u.fills:
                 stored.append(self.filled_type(ast.List(elts=[]), name + "[]", u))
             keys = _homogeneous((self.infer(k, u) for k in u.keys.get(name, ())), strict=True)
-            if isinstance(value, ast.Call) and value.args and not stored:  # defaultdict(<factory>)
+            if isinstance(value, ast.Call) and value.args and not stored:
                 t = self.infer(value, u)
                 return ("dict", keys, t[2], t[3]) if keys is not None and t is not None and t[0] == "dict" else t
             return ("dict", keys, _homogeneous(stored), None)
@@ -1778,9 +1639,9 @@ class _Analyzer:
                         return None
                     return ("cls" if "classmethod" in decs else "inst", self.path, ci.name)
                 if ci.model and VALS_PARAMS.get(fn.name) == idx:  # type: ignore[attr-defined]
-                    return ("vals", ci.model)  # create(self, vals_list) / write(self, vals)...
+                    return ("vals", ci.model)
         if arg.arg == "env":
-            return ENV  # hooks, migrations, helpers: an Environment by convention
+            return ENV
         return None
 
     def lambda_param_type(self, lam: ast.Lambda, idx: int, s: _Scope, u: _Unit) -> tuple | None:
@@ -1811,7 +1672,7 @@ class _Analyzer:
             if name == "groupby" and args and (kw == "key" or (len(args) > 1 and args[1] is lam)):
                 return _elem(self.infer(args[0], u))
         if s.parent is not None and s.parent.kind == "class" and u.cls is not None and u.cls.model:
-            return ("rs", (u.cls.model,))  # field default=/compute=/domain= lambdas
+            return ("rs", (u.cls.model,))
         return None
 
     def annotation_type(self, ann: ast.AST, u: _Unit, _depth: int = 0) -> tuple | None:
@@ -1853,7 +1714,6 @@ class _Analyzer:
         return None
 
     def class_name_type(self, name: str, u: _Unit) -> tuple | None:
-        """A class name in an annotation: a model class (imported or 19+ naming rule)."""
         s, binders = _lookup(u.base, name)
         if binders:
             t = _union([self.binder_type(b, s, u) for b in binders])  # type: ignore[arg-type]
@@ -1861,6 +1721,7 @@ class _Analyzer:
                 return t
             if t is not None and t[0] == "cls":
                 return ("inst", t[1], t[2])
+        # 19+: a class name gives its model name (SaleOrder -> sale.order)
         if (self.major or 0) >= 19 and name[:1].isupper():
             model = _CAMEL.sub(r".\1", name).lower()
             if self.has_model(model):
@@ -1903,9 +1764,6 @@ class _Analyzer:
         return OBJ
 
     def inst_attr_type(self, path: str, clsname: str, attr: str) -> tuple | None:
-        """``obj.attr`` on an instance / class of a plain python class: methods are
-        objects, attributes assigned as ``self.attr = ...`` / ``cls.attr = ...`` in
-        its methods (or its bases') have the type of the assigned values."""
         key = (path, clsname, attr)
         if key in self._insts:
             return self._insts[key]
@@ -1986,7 +1844,7 @@ class _Analyzer:
             return self.builtin_call(ft[1], node, u)
         if k in ("cls", "func"):
             if k == "cls" and ft[2] == "Form" and node.args and ft[1].replace("\\", "/").endswith(("odoo/tests/form.py", "odoo/tests/common.py")):
-                t = self.infer(node.args[0], u)  # a form proxies the fields of its record
+                t = self.infer(node.args[0], u)
                 return t if t is not None and t[0] == "rs" else None
             special = self.special_call(_call_name(func), node, u)
             if special is not None:
@@ -1997,11 +1855,10 @@ class _Analyzer:
                 return ("inst", ft[1], ft[2])
             return None if self.reg.module_of_path(ft[1]) else OBJ
         if k == "rs":
-            return None  # a model class called (rare)
+            return None
         return OBJ
 
     def special_call(self, name: str | None, node: ast.Call, u: _Unit) -> tuple | None:
-        """Library helpers with a known result shape."""
         args = node.args
         if name == "defaultdict":
             if args and isinstance(args[0], ast.Lambda):
@@ -2106,7 +1963,7 @@ class _Analyzer:
         if meth in ("_read_group", "read_group"):
             return self.read_group_type(models, meth, node)
         if meth in ("read", "search_read", "web_search_read", "formatted_read_group", "web_read_group"):
-            return ("list", OBJ)  # dicts
+            return ("list", OBJ)
         if meth in ("search_count", "name_get", "fields_get", "check_access", "has_access"):
             return OBJ
         if meth == "default_get":
@@ -2148,8 +2005,6 @@ class _Analyzer:
         return ("list", ("tuple", tuple(items)))
 
     def returns_type(self, models: tuple, meth: str) -> tuple | None:
-        """Return type of a method: its ``-> ...`` annotation, else the types of
-        the ``return`` statements of its most derived definition(s)."""
         out: list = []
         for m in models:
             kind, defs = self.member(m, meth)
@@ -2175,16 +2030,16 @@ class _Analyzer:
             return None
         if len(_RET_CACHE) > 20000:
             _RET_CACHE.clear()
-        _RET_CACHE[key] = None  # recursion guard (super() chains, mutual calls)
+        _RET_CACHE[key] = None
         res = None
         _CROSS[0] += 1
         try:
             for d in defs[:6]:
                 t = _def_returns(self, d)
                 if t is not None:
-                    src = d.model or "base"  # framework classes are analysed as ``base``
+                    src = d.model or "base"
                     if src != model:
-                        t = _subst(t, src, model)  # e.g. ``return self`` in a mixin
+                        t = _subst(t, src, model)
                     res = t
                     break
         finally:
@@ -2266,8 +2121,6 @@ class _Analyzer:
             return OBJ
         return OBJ
 
-    # -- python symbols ---------------------------------------------------------
-
     def import_sym(self, alias: ast.alias, stmt: ast.AST) -> tuple | None:
         reg = self.reg
         if isinstance(stmt, ast.Import):
@@ -2282,7 +2135,6 @@ class _Analyzer:
         return _resolve_symbol(reg, module, alias.name)
 
     def facts_import_sym(self, imp: tuple) -> tuple | None:
-        """``import_sym`` for an Import tuple of the facts."""
         reg = self.reg
         if imp[I_NAME] is None:
             return _module_sym(reg, imp[I_MODULE] if imp[I_ASNAME] else imp[I_MODULE].split(".")[0])
@@ -2325,14 +2177,8 @@ class _Analyzer:
             return REQ
         return OBJ
 
-    # -- strings with an Odoo meaning ------------------------------------------------
-
+    # -> (mode, models | None, role); mode: path | name | order | key | default | model | xmlid
     def classify_string(self, node: ast.Constant, u: _Unit) -> tuple | None:
-        """Odoo role of a str literal in code: (mode, models, role) where mode is
-        "path" (dotted field path), "name" (field name, maybe ``f:agg``),
-        "order" (``"f desc, g"``), "key" (field-values key), "default"
-        (``default_<field>`` context key), "model" or "xmlid"; models is the
-        tuple of candidate base models (None when unknown)."""
         parents = u.parents
         p = parents.get(node)
         if p is None:
@@ -2361,7 +2207,7 @@ class _Analyzer:
                 op = elts[1]
                 if isinstance(op, ast.Constant):
                     leaf = isinstance(op.value, str) and op.value.lower() in LEAF_OPERATORS and not _is_leaf_value(p, parents)
-                else:  # ``(path, operator, value)`` in a ``_search_x`` method
+                else:  # (path, operator, value) in a _search_x method
                     leaf = isinstance(op, (ast.Name, ast.Attribute, ast.Subscript, ast.Call))
                 if leaf:
                     models = self.domain_models(p, u)
@@ -2388,7 +2234,7 @@ class _Analyzer:
                 return ("name", vt[1], "subscript")
             if vt[0] == "vals":
                 return ("key", (vt[1],), "vals")
-            if vt[0] == "dict" and isinstance(p.value, ast.Name):  # res['x'] = ...; create(res)
+            if vt[0] == "dict" and isinstance(p.value, ast.Name):
                 models = self.var_vals_models(p.value, u, 0)
                 if models:
                     return ("key", models, "vals")
@@ -2440,13 +2286,7 @@ class _Analyzer:
             return ("order", models, meth)
         return None
 
-    # -- domains / values / contexts: from a literal to the model consuming it -------
-
     def domain_models(self, node: ast.AST, u: _Unit, depth: int = 0) -> tuple | None:
-        """Models a domain literal (or ``Domain(...)``) is applied to, found by
-        following it to its consumer (search & co, a variable passed to one,
-        an action dict with ``res_model``, a field ``domain=``, a nested
-        ``any`` leaf...)."""
         if depth > 3:
             return None
         parents = u.parents
@@ -2474,8 +2314,7 @@ class _Analyzer:
                 if not isinstance(call, ast.Call):
                     return None
                 if p.arg in DOMAIN_KWARGS:
-                    # only ORM domain consumers filter their receiver: a ``domain=``
-                    # of another method (``_stage_find(domain=...)``) may target any model
+                    # ORM consumers only: _stage_find(domain=...) may target any model
                     if _call_name(call.func) in DOMAIN_ARGS:
                         return self.consumer_models(call, u)
                     if p.arg == "domain" and _field_class(call, self.scope_of(call, u)):
@@ -2529,8 +2368,6 @@ class _Analyzer:
         return tuple(dict.fromkeys(out)) or None
 
     def search_method_models(self, u: _Unit) -> tuple | None:
-        """The model of the unit when its method is a field ``search=`` method
-        (it returns a domain on its own model)."""
         fn, ci = u.root, u.cls
         if not isinstance(fn, _FUNC) or ci is None or not ci.model:
             return None
@@ -2563,14 +2400,10 @@ class _Analyzer:
         return None
 
     def uses_of(self, name: ast.Name, u: _Unit) -> list[ast.Name]:
-        """Other loads of the variable bound by ``name`` in the same unit."""
         s = _lookup(self.scope_of(name, u), name.id)[0]
         return [n for n in u.loads.get(name.id, ()) if n is not name and _lookup(self.scope_of(n, u), n.id)[0] is s]
 
     def vals_models(self, d: ast.Dict, u: _Unit, depth: int = 0) -> tuple | None:
-        """Models a dict literal holds field values of (create/write/... argument,
-        ``Command.create`` / ``(0, 0, vals)`` of an x2many key, a variable passed
-        to one of those, ``vals.update({...})``)."""
         if depth > 3:
             return None
         parents = u.parents
@@ -2582,7 +2415,7 @@ class _Analyzer:
             if isinstance(p, ast.List) or (isinstance(p, ast.Tuple) and not _is_command_tuple(p)):
                 cur = p
                 continue
-            if isinstance(p, ast.Tuple):  # (0, 0, vals) / (1, id, vals)
+            if isinstance(p, ast.Tuple):
                 if p.elts[2] is not cur:
                     return None
                 return self.x2many_models(p, u, depth)
@@ -2619,7 +2452,6 @@ class _Analyzer:
             return None
 
     def vals_receiver(self, call: ast.Call, u: _Unit) -> tuple | None:
-        """``vals.update({...})`` on a field-values dict."""
         if isinstance(call.func, ast.Attribute) and call.func.attr == "update":
             t = self.infer(call.func.value, u)
             if t is not None and t[0] == "vals":
@@ -2643,7 +2475,6 @@ class _Analyzer:
         return None
 
     def x2many_models(self, cmd: ast.AST, u: _Unit, depth: int) -> tuple | None:
-        """Comodels of the x2many key whose value holds the command ``cmd``."""
         parents = u.parents
         cur = cmd
         while True:
@@ -2679,7 +2510,7 @@ class _Analyzer:
                         if key and vt is not None and vt[0] == "vals":
                             cm = self.comodel(vt[1], key)
                             return (cm,) if cm else None
-                    if isinstance(t, ast.Attribute):  # rec.line_ids = [Command.create({...})]
+                    if isinstance(t, ast.Attribute):
                         vt = self.infer(t.value, u)
                         if vt is not None and vt[0] == "rs":
                             out = [self.comodel(m, t.attr) for m in vt[1]]
@@ -2698,8 +2529,6 @@ class _Analyzer:
         return tuple(dict.fromkeys(out)) or None
 
     def context_models(self, d: ast.AST, u: _Unit, depth: int = 0) -> tuple | None:
-        """Models a context dict applies ``default_*`` keys to: ``with_context({...})``
-        receivers, the ``res_model`` of an action dict holding it as ``context``."""
         parents = u.parents
         p = parents.get(d)
         if isinstance(p, ast.Call) and isinstance(p.func, ast.Attribute) and p.func.attr == "with_context" and d in p.args:
@@ -2708,11 +2537,11 @@ class _Analyzer:
             for k, v in zip(p.keys, p.values):
                 if v is d and _str_const(k) == "context":
                     return self.action_model(p)
-        if isinstance(p, ast.keyword) and p.arg is None:  # with_context(**{...})
+        if isinstance(p, ast.keyword) and p.arg is None:
             call = parents.get(p)
             if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "with_context":
                 return self.consumer_models(call, u)
-        if isinstance(p, ast.Assign) and depth < 2:  # ctx = {...}; ...with_context(ctx) / 'context': ctx
+        if isinstance(p, ast.Assign) and depth < 2:
             out: list[str] = []
             for t in p.targets:
                 if isinstance(t, ast.Name):
@@ -2721,12 +2550,8 @@ class _Analyzer:
             return tuple(dict.fromkeys(out)) or None
         return None
 
-    # -- unknown receivers ---------------------------------------------------------------
-
+    # -> (models, how); how ('member-name' | 'duck-typing') becomes extra['guess'] (hover flag)
     def candidates(self, attr: str, node: ast.Attribute | None, u: _Unit | None) -> tuple[list[str], str]:
-        """Models that may own member ``attr`` of a receiver of unknown type:
-        visible models declaring it, narrowed by the other members accessed on
-        the same variable (duck typing), collapsed to the most general ones."""
         if attr in NON_MODEL_ATTRS or attr.startswith("__") or attr in MAGIC_FIELDS or attr in RS_SLOTS:
             return [], ""
         if self.scope is None:
@@ -2752,9 +2577,6 @@ class _Analyzer:
         return cands, how
 
     def lineage(self, model: str) -> set[str]:
-        """``model`` and its ancestors (``_inherit`` parents, ``_inherits``
-        parents, recursively) from the class declarations only - cheap, unlike
-        a full MRO."""
         hit = self._lineages.get(model)
         if hit is not None:
             return hit
@@ -2773,7 +2595,6 @@ class _Analyzer:
         return out
 
     def sibling_attrs(self, node: ast.Attribute, u: _Unit) -> set[str]:
-        """Model-specific attributes accessed on the same variable as ``node`` in the unit."""
         name = node.value.id  # type: ignore[attr-defined]
         target_scope = _lookup(self.scope_of(node.value, u), name)[0]
         out = set()
@@ -2790,7 +2611,6 @@ class _Analyzer:
         return out
 
     def rank(self, models: list[str], u: _Unit | None) -> list[str]:
-        """Order candidate models by relatedness to the file (best first)."""
         cur = u.cls.model if u is not None and u.cls is not None else None
         if self._rank_info is None or self._rank_info[0] != cur:
             comodels: set[str] = set()
@@ -2822,10 +2642,7 @@ class _Analyzer:
 
         return sorted(models, key=score)
 
-    # -- targets ------------------------------------------------------------------
-
     def member_targets(self, models: tuple, attr: str, is_call: bool, origin: tuple, extra: dict, u: _Unit | None) -> list[Target]:
-        """FIELD / METHOD / ATTR target(s) for ``attr`` on recordsets of ``models``."""
         found: list[tuple[str, str]] = []
         for m in models:
             kind, _defs = self.member(m, attr)
@@ -2840,7 +2657,7 @@ class _Analyzer:
                 return [Target(tkind, model=owners[0], name=attr, origin=origin, extra=dict(extra, inferred=True))]
             return [Target(tkind, model=None, models=owners, name=attr, origin=origin, extra=dict(extra, inferred=True))]
         if attr in NON_MODEL_ATTRS:
-            return []  # e.g. a list / set variable also assigned a recordset elsewhere
+            return []  # e.g. a list also assigned a recordset elsewhere: no missing member
         # not declared on the model: an abstract mixin using members of its inheritors?
         heirs = [c for c in self.candidates(attr, None, None)[0] if any(m in self.lineage(c) for m in models)]
         tkind = METHOD if is_call else FIELD
@@ -2888,7 +2705,6 @@ class _Analyzer:
 
 
 def _is_empty_container(node: ast.AST) -> bool:
-    """``[]``, ``{}``, ``set()``, ``list()``, ``dict()``, ``OrderedSet()``, ``defaultdict(list)``..."""
     if isinstance(node, (ast.List, ast.Set)):
         return not node.elts
     if isinstance(node, ast.Dict):
@@ -2902,7 +2718,6 @@ def _is_empty_container(node: ast.AST) -> bool:
 
 
 def _is_leaf_value(seq: ast.AST, parents: dict) -> bool:
-    """``seq`` is the value of an enclosing domain leaf (``('state', 'in', seq)``)."""
     p = parents.get(seq)
     if not isinstance(p, (ast.List, ast.Tuple)) or len(p.elts) != 3 or p.elts[2] is not seq:
         return False
@@ -2911,20 +2726,15 @@ def _is_leaf_value(seq: ast.AST, parents: dict) -> bool:
 
 
 def _is_comp_elt(p: ast.AST, cur: ast.AST) -> bool:
-    """``cur`` is the element of comprehension ``p`` (``[{...} for x in xs]``)."""
     return isinstance(p, (ast.ListComp, ast.SetComp, ast.GeneratorExp)) and p.elt is cur
 
 
 def _is_seq_call(p: ast.AST, cur: ast.AST) -> bool:
-    """``list(cur)`` / ``tuple(cur)``."""
     return isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id in ("list", "tuple") and p.args[:1] == [cur]
 
 
+# same forms as pyfacts: fields.X(...) or X imported from a *field* module (saas-18.3+ odoo/orm)
 def _field_class(call: ast.Call, scope: _Scope) -> str | None:
-    """Field class of a field declaration call, the forms of the facts extractor:
-    ``fields.X(...)`` (also ``odoo.fields`` / ``openerp.fields``) or ``X(...)``
-    with ``X`` imported by name from a ``*field*`` module (``from odoo.fields
-    import Many2one``, 19+ ``from .fields_misc import Id``)."""
     func = call.func
     if isinstance(func, ast.Attribute):
         return func.attr if _dotted(func.value) in FIELDS_MODULES and func.attr[:1].isupper() else None
@@ -2952,13 +2762,11 @@ def _field_comodel(call: ast.Call, ftype: str) -> str | None:
 
 
 def _is_command_tuple(t: ast.Tuple) -> bool:
-    """``(0, 0, vals)`` / ``(1, id, vals)`` x2many command tuples."""
     elts = t.elts
     return len(elts) == 3 and isinstance(elts[0], ast.Constant) and elts[0].value in (0, 1) and isinstance(elts[2], (ast.Dict, ast.Name, ast.Call))
 
 
 def _python_bases(an: _Analyzer, ci: _ClassInfo) -> list[tuple[str, str]]:
-    """(path, class name) of the python base classes of a class of ``an``'s file."""
     out = []
     for b in ci.node.bases:
         dotted = _dotted(b)
@@ -2986,14 +2794,13 @@ def _python_bases(an: _Analyzer, ci: _ClassInfo) -> list[tuple[str, str]]:
     return out
 
 
-_CROSS = [0]  # nesting of cross-file inferences
+_CROSS = [0]
 _RET_CACHE: dict[tuple, Any] = {}
 _SNIPPETS: OrderedDict[tuple, Any] = OrderedDict()
 _LINES: OrderedDict[str, tuple] = OrderedDict()
 
 
 def _file_lines(path: str) -> list[bytes] | None:
-    """Lines of a file on disk (small cache validated by mtime / size)."""
     try:
         st = os.stat(path)
     except OSError:
@@ -3013,10 +2820,8 @@ def _file_lines(path: str) -> list[bytes] | None:
     return lines
 
 
+# parses only the method, in a stand-in class carrying its model; module scope from facts
 def _method_snippet(reg: Any, d: Any) -> tuple[_Analyzer, _Unit] | None:
-    """Analyzer + unit for one method definition of another file, parsing only
-    the method's source (within a stand-in class carrying its model); the
-    module scope comes from the file's facts."""
     key = (d.path, d.line)
     if key in _SNIPPETS:
         _SNIPPETS.move_to_end(key)
@@ -3058,8 +2863,6 @@ def _method_snippet(reg: Any, d: Any) -> tuple[_Analyzer, _Unit] | None:
 
 
 def _def_returns(an: _Analyzer, d: Any) -> tuple | None:
-    """Union of the types of the ``return`` values of a method definition
-    (a registry MemberDef); None when unknown."""
     if d.path == an.path and not an.f.partial:
         other = an
         u = an.f.unit_at(d.line)
@@ -3116,24 +2919,20 @@ def _inst_attr_type(an: _Analyzer, path: str, clsname: str, attr: str, depth: in
     return None
 
 
-# ---------------------------------------------------------------------------
-# tokens: what the cursor can designate on a line
-
-
 class _Tok:
     __slots__ = ("c0", "c1", "prio", "kind", "data")
 
     def __init__(self, c0: int, c1: int, prio: int, kind: str, data: Any):
-        self.c0 = c0  # UTF-16 columns of the token on the line
+        self.c0 = c0  # UTF-16 columns
         self.c1 = c1
-        self.prio = prio  # 0 Odoo strings / definitions, 1 attributes & def names, 2 plain names
+        # prio, lower wins: 0 Odoo strings/refs, 1 attrs/defs/imports, 2 names/args, 3 inert/kwarg
+        self.prio = prio
         self.kind = kind
         self.data = data
 
 
+# -> (line0, start byte, end byte, exact) of a 1-line str's content; exact: bytes map 1:1
 def _str_content(f: _File, node: ast.Constant) -> tuple[int, int, int, bool] | None:
-    """(line0, start byte, end byte, exact) of the content of a single-line str
-    literal; ``exact`` when byte offsets inside map 1:1 to the value."""
     if node.lineno != node.end_lineno:
         return None
     l0 = node.lineno - 1
@@ -3159,9 +2958,8 @@ _MODEL_NAME = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+\Z")
 _AGG_SPEC = re.compile(r"\s*\w+\s*:\s*\w+\s*\(\s*([\w.]+)\s*\)\s*$")
 
 
+# 'f', 'f:sum', 'date:month', 16.0 read_group alias 'total:sum(amount)' -> (path, offset)
 def _spec_field(value: str) -> tuple[str, int]:
-    """(field path, offset in ``value``) of a field-name argument: ``'f'``,
-    ``'f:sum'``, ``'date:month'`` or a 16.0 read_group alias ``'total:sum(amount)'``."""
     m = _AGG_SPEC.match(value)
     if m:
         return m.group(1), m.start(1)
@@ -3169,8 +2967,6 @@ def _spec_field(value: str) -> tuple[str, int]:
 
 
 def _segments(value: str, sep: str, c0: int, c1: int, exact: bool) -> list[tuple[int, str, int, int]]:
-    """(index, item, byte start, byte end) of the ``sep``-separated items of a
-    string whose content spans bytes ``[c0, c1)`` (whole span if not exact)."""
     out = []
     pos = 0
     for i, part in enumerate(value.split(sep)):
@@ -3186,7 +2982,6 @@ def _segments(value: str, sep: str, c0: int, c1: int, exact: bool) -> list[tuple
 
 
 def _walk_lines(root: ast.AST, lo: int, hi: int, header: bool = False) -> Iterator[ast.AST]:
-    """Nodes under ``root`` that may intersect 1-based lines ``[lo, hi]``."""
     if header and isinstance(root, ast.ClassDef):
         stack: list[ast.AST] = list(root.decorator_list) + list(root.bases) + list(root.keywords)
     else:
@@ -3202,15 +2997,13 @@ def _walk_lines(root: ast.AST, lo: int, hi: int, header: bool = False) -> Iterat
 
 
 class _LineTokens:
-    """Collects the tokens of one line of the analysed file."""
-
     def __init__(self, an: _Analyzer, line0: int, facts: dict | None):
         self.an = an
         self.f = an.f
         self.line0 = line0
         self.facts = facts
         self.toks: list[_Tok] = []
-        self.strings: list[tuple[int, int]] = []  # UTF-16 spans of string literals (comment detection)
+        self.strings: list[tuple[int, int]] = []
         self.unit: _Unit | None = None
 
     def add(self, c0: int, c1: int, prio: int, kind: str, data: Any) -> None:
@@ -3233,8 +3026,6 @@ class _LineTokens:
             seen.add(key)
             out.append(t)
         return out
-
-    # -- from facts ----------------------------------------------------------------
 
     def facts_tokens(self) -> None:
         facts = self.facts
@@ -3275,8 +3066,6 @@ class _LineTokens:
                 if a[A_LINE] == line0:
                     self.add(a[A_COL], a[A_END_COL], 1, "attrdef", (idx, a, model, cls))
 
-    # -- from the AST -------------------------------------------------------------------
-
     def ast_tokens(self, u: _Unit) -> None:
         f = self.f
         an = self.an
@@ -3305,11 +3094,11 @@ class _LineTokens:
                         sup = u.parents[node]
                         attr = u.parents.get(sup)
                         if isinstance(attr, ast.Attribute) and attr.value is sup:
-                            self.add(c0, c1, 2, "super", attr)  # resolves like the attribute it reaches
+                            self.add(c0, c1, 2, "super", attr)
                         else:
                             self.add(c0, c1, 3, "inert", node)
                     else:
-                        self.add(c0, c1, 3, "inert", node)  # a builtin: nothing, but no snapping either
+                        self.add(c0, c1, 3, "inert", node)  # builtin: no target, no snapping
             elif isinstance(node, ast.keyword):
                 if node.arg and node.lineno == lineno:
                     b0 = node.col_offset
@@ -3318,8 +3107,8 @@ class _LineTokens:
                     if node.arg.startswith("default_") and isinstance(call, ast.Call) and _call_name(call.func) == "with_context":
                         self.add(c0, c1, 0, "ctxkw", node)
                     elif isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "dict":
-                        self.add(c0, c1, 0, "dictkw", (node, call))  # create(dict(name=...))
-                    else:  # a keyword-argument name: its value's Odoo string (compute='_x'), else nothing
+                        self.add(c0, c1, 0, "dictkw", (node, call))
+                    else:
                         self.add(c0, c1, 3, "kwarg", node)
             elif isinstance(node, _FUNC + (ast.ClassDef,)):
                 if node.lineno == lineno:
@@ -3346,7 +3135,6 @@ class _LineTokens:
         self.strings.append((f.u16(l0, node.col_offset), f.u16(l0, node.end_col_offset or 0)))
         role = self.an.classify_string(node, u)
         if role is None:
-            # a literal naming a known model ('sale.order' passed to any helper)
             if exact and _MODEL_NAME.match(node.value) and self.an.has_model(node.value):
                 self.add(f.u16(l0, b0), f.u16(l0, b1), 0, "str", (node, ("model", None, "literal"), 0, node.value, b0, b1))
             return
@@ -3357,7 +3145,7 @@ class _LineTokens:
             return
         if mode == "order":
             for _i, item, s0, s1 in _segments(value, ",", b0, b1, exact):
-                fname = item.split()[0].split(":")[0]  # 'date:min desc' (read_group orderby)
+                fname = item.split()[0].split(":")[0]
                 pos = 0
                 for j, seg in enumerate(fname.split(".")):
                     e0 = s0 + pos if exact else s0
@@ -3365,7 +3153,7 @@ class _LineTokens:
                     self.add(f.u16(l0, e0), f.u16(l0, e1), 0, "str", (node, role, j, fname, e0, e1))
                     pos += len(seg.encode("utf-8")) + 1
             return
-        if mode == "name":  # 'f', 'f:agg', 'date:month', 'alias:agg(f)'
+        if mode == "name":
             path, k = _spec_field(value)
             if exact:
                 b0 += len(value[:k].encode("utf-8"))
@@ -3413,7 +3201,6 @@ class _LineTokens:
 
 
 def _def_name_pos(f: _File, node: ast.AST) -> tuple[int, int, int] | None:
-    """(line0, col16, end_col16) of the name of a def / class statement."""
     l0 = node.lineno - 1  # type: ignore[attr-defined]
     line = f.lines[l0]
     kw = b"class" if isinstance(node, ast.ClassDef) else b"def"
@@ -3426,7 +3213,6 @@ def _def_name_pos(f: _File, node: ast.AST) -> tuple[int, int, int] | None:
 
 
 def _comment_start(f: _File, line0: int, strings: list[tuple[int, int]]) -> int | None:
-    """UTF-16 column of a ``#`` comment on the line (outside string literals)."""
     raw = f.lines[line0] if line0 < len(f.lines) else b""
     i = raw.find(b"#")
     while i >= 0:
@@ -3438,9 +3224,6 @@ def _comment_start(f: _File, line0: int, strings: list[tuple[int, int]]) -> int 
 
 
 def _pick(toks: list[_Tok], col: int) -> _Tok | None:
-    """The token under (or nearest to) the cursor: containing tokens first
-    (innermost), else the closest within LENIENCY columns, weighing Odoo
-    strings and attribute names over plain names; ties go to the right."""
     inside = [t for t in toks if t.c0 <= col < t.c1]
     if inside:
         return min(inside, key=lambda t: (t.c1 - t.c0, t.prio))
@@ -3454,10 +3237,6 @@ def _pick(toks: list[_Tok], col: int) -> _Tok | None:
         if best_key is None or key < best_key:
             best, best_key = t, key
     return best
-
-
-# ---------------------------------------------------------------------------
-# token -> targets
 
 
 def _resolve(an: _Analyzer, lt: _LineTokens, tok: _Tok) -> list[Target]:
@@ -3541,9 +3320,6 @@ def _resolve(an: _Analyzer, lt: _LineTokens, tok: _Tok) -> list[Target]:
 
 
 def _kwarg_targets(an: _Analyzer, lt: _LineTokens, kw: ast.keyword, line0: int) -> list[Target]:
-    """A keyword-argument name: the targets of the Odoo string token (facts ref or
-    role string) starting its value on the same line, e.g. ``compute='_compute_x'``;
-    nothing for other values (``string="Customer"``, ``body=...``)."""
     v = kw.value
     if v.lineno - 1 != line0:
         return []
@@ -3614,7 +3390,6 @@ def _const_at(lt: _LineTokens, ref: tuple) -> ast.Constant | None:
 
 
 def _path_segment_targets(an: _Analyzer, models: tuple | None, path: str, seg: int, origin: tuple, extra: dict, u: _Unit | None) -> list[Target]:
-    """FIELD target for segment ``seg`` of field path ``path`` walked from ``models``."""
     segs = path.split(".")
     if seg >= len(segs):
         return []
@@ -3642,7 +3417,6 @@ def _path_segment_targets(an: _Analyzer, models: tuple | None, path: str, seg: i
 
 
 def _field_name_targets(an: _Analyzer, models: tuple | None, name: str, origin: tuple, extra: dict, u: _Unit | None) -> list[Target]:
-    """A field name used as a values / context key."""
     if models:
         found = [m for m in models if an.member(m, name)[0] == "field"]
         if len(found) == 1:
@@ -3672,7 +3446,7 @@ def _string_targets(an: _Analyzer, tok: _Tok, origin: tuple) -> list[Target]:
         return _field_name_targets(an, models, name, o, dict(extra, role="default"), u)
     if mode == "name" and path == "__count":
         return []
-    if rname == "getattr" and models:  # getattr(rec, 'x'): a field, method or attribute
+    if rname == "getattr" and models:
         return an.member_targets(models, node.value, False, origin, extra, u)
     return _path_segment_targets(an, models, path, seg, origin, dict(extra, path=path), u)
 
@@ -3726,9 +3500,6 @@ def _attr_targets(an: _Analyzer, node: ast.Attribute, u: _Unit, origin: tuple) -
 
 
 def _super_kind(an: _Analyzer, model: str, attr: str, is_call: bool) -> str:
-    """Target kind of ``super().attr`` on ``model``: a method unless the member is
-    only a field or a class attribute (e.g. a property overriding a mixin's
-    class attribute reaches that attribute)."""
     if is_call:
         return METHOD
     kind = an.member(model, attr)[0]
@@ -3740,7 +3511,6 @@ def _super_kind(an: _Analyzer, model: str, attr: str, is_call: bool) -> str:
 
 
 def _python_member(an: _Analyzer, path: str, clsname: str, attr: str) -> tuple | None:
-    """Definition of ``attr`` on python class ``clsname`` of file ``path``."""
     if path == an.path:
         other: _Analyzer | None = an
     else:
@@ -3751,18 +3521,15 @@ def _python_member(an: _Analyzer, path: str, clsname: str, attr: str) -> tuple |
 
 
 def _env_class_targets(an: _Analyzer, attr: str | None, origin: tuple, extra: dict) -> list[Target]:
-    """``env`` itself -> the Environment class; ``env.<attr>`` -> its member."""
     sym = _resolve_symbol(an.reg, "odoo.api", "Environment")
     if sym is None or sym[0] != "sym":
         return []
     if attr is None:
         return an.sym_targets(sym, origin, extra)
-    # _python_member also finds annotations (``cr: BaseCursor``) and ``self.x = ...``
     return an.sym_targets(_python_member(an, sym[1], sym[2], attr), origin, extra)
 
 
 def _py_super_member(an: _Analyzer, ci: _ClassInfo, attr: str) -> tuple | None:
-    """``super().attr`` in a plain python class: the member in its bases."""
     for bpath, bname in _python_bases(an, ci):
         res = _python_member(an, bpath, bname, attr)
         if res is not None:
@@ -3771,9 +3538,6 @@ def _py_super_member(an: _Analyzer, ci: _ClassInfo, attr: str) -> tuple | None:
 
 
 def _class_member_def(an: _Analyzer, clsname: str, attr: str, depth: int = 0) -> tuple | None:
-    """Definition of ``attr`` on python class ``clsname`` of ``an``'s file: a def or
-    class attribute, else the first ``self.<attr> = ...`` / ``cls.<attr> = ...``
-    assignment in its methods; searched through its python bases (any file)."""
     if depth > 4:
         return None
     f = an.f
@@ -3903,12 +3667,7 @@ def _text(f: _File, node: ast.AST) -> str | None:
     return text if len(text) <= 80 else text[:79] + "…"
 
 
-# ---------------------------------------------------------------------------
-# public API
-
-
 def targets_at(ctx: Any) -> list[Target]:
-    """Targets for the token at ``(ctx.line, ctx.col)`` of a Python file, best first."""
     reg = ctx.registry
     if reg is None:
         return []
@@ -3938,25 +3697,9 @@ def targets_at(ctx: Any) -> list[Target]:
     return _resolve(an, lt, tok)
 
 
+# -> sorted [(line0, col16, end_col16, receiver models | None, attr|call|super|string|key)]
+# strings already in facts refs (related=, @api.depends, field domain=...) are not repeated
 def member_usages(registry: Any, path: str, source: bytes, name: str) -> list[tuple[int, int, int, list[str] | None, str]]:
-    """All usages of attribute / method / field ``name`` in a Python file, sorted:
-    ``(line, col, end_col, receiver_models, kind)``; receiver_models are the
-    models the receiver was inferred to be (None: unknown). Kinds:
-
-    * "attr": ``x.name`` read or written; "call": ``x.name(...)``;
-      "super": ``super().name(...)`` (receiver: the current model);
-    * "string": a segment equal to ``name`` of a field path / field name /
-      order string in code (``mapped``, ``filtered``, ``sorted``, ``grouped``,
-      domains, ``read``, ``_read_group`` specs, ``order=``...); the range covers
-      that segment and the receiver is the model owning it;
-    * "key": a key of field values (``create``/``write``/``update``/
-      ``copy(default=)``/``new``, ``Command.create``, ``(0, 0, vals)``,
-      ``vals['name']``, ``'name' in vals``...) or a ``default_<name>`` context
-      key / ``with_context`` keyword (range: the ``name`` part).
-
-    Strings already in the facts refs (``related=``, ``@api.depends``, field
-    ``domain=``...) are not repeated. Returns at once when ``name`` is not in
-    ``source``."""
     bname = name.encode("utf-8")
     if not name or bname not in source:
         return []
@@ -3997,7 +3740,6 @@ def member_usages(registry: Any, path: str, source: bytes, name: str) -> list[tu
 
 
 def _walk_candidate_lines(u: _Unit, cand: list[int]) -> Iterator[ast.AST]:
-    """Nodes of the unit that may lie on one of the (sorted, 1-based) lines."""
     def hit(lo: int, hi: int) -> bool:
         i = bisect_left(cand, lo)
         return i < len(cand) and cand[i] <= hi
@@ -4035,7 +3777,7 @@ def _attr_usage(an: _Analyzer, node: ast.Attribute, u: _Unit) -> tuple | None:
         models = [rt[1].model] if rt[1].model else None
         return (l0, c0, c1, models, "super")
     else:
-        return None  # not a recordset (module, env, scalar, dict...)
+        return None
     return (l0, c0, c1, models, "call" if is_call else "attr")
 
 
@@ -4092,7 +3834,6 @@ def _string_usages(an: _Analyzer, node: ast.Constant, u: _Unit, name: str) -> li
 
 
 def _function_at(an: _Analyzer, line0: int) -> tuple[ast.AST | None, _Unit | None]:
-    """Innermost def containing 0-based ``line0`` (decorator lines included)."""
     u = an.f.unit_at(line0)
     if u is None:
         return None, None
@@ -4105,10 +3846,8 @@ def _function_at(an: _Analyzer, line0: int) -> tuple[ast.AST | None, _Unit | Non
     return best, u
 
 
+# -> sorted [(name, line0, col16, end_col16, models | None)]; known non-recordsets left out
 def calls_in_function(registry: Any, path: str, source: bytes, line: int) -> list[tuple[str, int, int, int, list[str] | None]]:
-    """Method calls inside the function enclosing 0-based ``line``:
-    ``(method_name, line, col, end_col, receiver_models or None)``; calls on
-    receivers known not to be recordsets are left out."""
     _use_registry(registry)
     an = _analyzer(registry, path, source, registry.file_facts(path), line)
     an.reset_budget()
@@ -4142,8 +3881,6 @@ def calls_in_function(registry: Any, path: str, source: bytes, line: int) -> lis
 
 
 def enclosing_function(registry: Any, path: str, source: bytes, line: int) -> dict | None:
-    """The def enclosing 0-based ``line``: {"model", "class", "name", "line",
-    "col", "end_col", "end_line"} (col/end_col = the def name token)."""
     _use_registry(registry)
     an = _analyzer(registry, path, source, registry.file_facts(path), line)
     fn, u = _function_at(an, line)

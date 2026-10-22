@@ -1,5 +1,3 @@
-"""Tests for features/hover.py: the markdown cards, on the mini fixture and real checkouts."""
-
 from __future__ import annotations
 
 import gc
@@ -24,7 +22,6 @@ MY = os.path.join(MINI, "custom/my_module/models/sale_order.py")
 
 
 def line_of(path: str, needle: str) -> int:
-    """1-based line of the first line of ``path`` containing ``needle``."""
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh, 1):
             if needle in line:
@@ -51,7 +48,6 @@ class FixtureHoverTest(unittest.TestCase):
         self.assertEqual(lines[1], "required · index")
         self.assertIn('"Customer"', md)
         self.assertIn(f"Defined in **sale** — {SALE}:{line_of(SALE, 'partner_id =')}", md)
-        # sale_stock is not a dependency of my_module: reported apart, with its arguments
         self.assertIn(f"outside this module's dependencies (applies only when installed): **sale_stock** ({SALE_STOCK}:{line_of(SALE_STOCK, 'partner_id =')}) `tracking=True`", md)
         self.assertIn("```python\npartner_id = fields.Many2one('res.partner', string='Customer', required=True, index=True)\n```", md)
 
@@ -90,7 +86,6 @@ class FixtureHoverTest(unittest.TestCase):
         self.assertIn("*Confirm the quotation into a sales order.*", md)
         self.assertIn(f"1. **my_module** — {MY}:{line_of(MY, 'def action_confirm')} · super()", md)
         self.assertIn(f"2. **sale** — {SALE}:{line_of(SALE, 'def action_confirm')}", md)
-        # the order every override runs in when all modules overriding it are installed
         full = md.split("**Call order with every module installed** (4, load order reversed; each `super()` continues on the next line):\n", 1)[1]
         self.assertEqual([line.split("**")[1] for line in full.splitlines()], ["sale_subscription", "sale_stock", "my_module", "sale"])
         self.assertIn("**sale_stock** — ", full)
@@ -118,7 +113,7 @@ class FixtureHoverTest(unittest.TestCase):
         self.assertIn("Views: 1 primary (sale.view_order_form) · 2 extension(s)", md)
         partner = self.card(Target(MODEL, model="res.partner"))
         self.assertIn("_rec_name `complete_name`", partner)
-        self.assertIn("- `access_res_partner_user` base.group_user: cru (base)", partner)  # bare group id qualified
+        self.assertIn("- `access_res_partner_user` base.group_user: cru (base)", partner)
         mixin = self.card(Target(MODEL, model="mail.thread"))
         self.assertIn("AbstractModel", mixin)
         self.assertIn("Inherited by 2 model(s): product.product, sale.order", mixin)
@@ -183,7 +178,7 @@ class FixtureHoverTest(unittest.TestCase):
         self.assertTrue(res["contents"]["value"].startswith("**sale.order.action_confirm**(self)"))
 
     def test_package_entry_point_stays_callable(self):
-        # importing features/hover.py rebinds odoo_lens.features.hover to the submodule
+        # the first import of features/hover.py rebinds features.hover to the submodule
         from odoo_lens import features
 
         views = os.path.join(MINI, "odoo/addons/sale/views/sale_order_views.xml")
@@ -234,7 +229,7 @@ class RealTreeHoverCase(unittest.TestCase):
         self.assertIn("mail.thread", model)
         self.assertIn("Access rights", model)
         state = self.card(Target(FIELD, model="sale.order", name="state"))
-        self.assertIn("`draft`", state)  # selection resolved even when given as a module constant
+        self.assertIn("`draft`", state)
         self.assertIn("`sale`", state)
         view = self.card(Target(XMLID, xmlid="sale.view_order_form"))
         self.assertIn("view of **sale.order** · form · primary", view)

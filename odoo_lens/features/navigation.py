@@ -1,24 +1,3 @@
-"""Go to definition, type definition and implementation.
-
-The entry points resolve the targets under the cursor (``analysis.targets_at``)
-and turn each :class:`~odoo_lens.analysis.targets.Target` into LSP locations
-with :func:`locations_for_target`, :func:`type_locations_for_target` and
-:func:`implementations_for_target`, which also work on hand-built targets.
-
-Order is part of the answer (Claude reads the first entries first):
-
-* definitions go base-most first - the original declaration, then the overrides
-  in load order - except for ``super().m()`` whose first location is the
-  definition the call actually reaches;
-* lookups are scoped to the dependency closure of the current module and fall
-  back to the whole env only when the scoped lookup finds nothing;
-* implementations list the target model's own classes first, then models
-  inheriting it, then what it inherits.
-
-Results are deduplicated and capped; ambiguous targets (``model`` None with
-candidate ``models``) yield the locations of each candidate, best first.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Iterator
@@ -61,17 +40,11 @@ MAX_IMPLEMENTATIONS = 100
 MAX_CANDIDATE_MODELS = 8
 MAX_VIEW_DEPTH = 10
 MAX_SUBCLASS_DEPTH = 4
-# unknown receivers count as uses of a member only when this many models (at
-# most) define its name: with two or more, the use is a guess between them
-# (precision over recall: the strictest value)
+# Precision: a use on an unknown receiver counts only if at most this many models define the name.
 MAX_UNKNOWN_RECEIVER_MODELS = 1
 
-Spot = tuple  # (path, line, col, end_col) - a location before URI conversion
-MEMBER_NAME = {K_FIELDS: F_NAME, K_METHODS: M_NAME, K_ATTRS: A_NAME}  # name index of the member tuples of a class
-
-
-# ---------------------------------------------------------------------------
-# entry points
+Spot = tuple  # (path, line, col, end_col): 0-based line, UTF-16 cols
+MEMBER_NAME = {K_FIELDS: F_NAME, K_METHODS: M_NAME, K_ATTRS: A_NAME}
 
 
 def definition(ctx: Any) -> list[dict]:
@@ -128,10 +101,6 @@ def _locations(ctx: Any, spots: Iterable[Spot], cap: int) -> list[dict]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# shared helpers (also used by hover and calls)
-
-
 def class_spot(c: ClassRef) -> Spot:
     f = c.facts
     return (c.path, f[K_LINE], f[K_COL], f[K_END_COL])
@@ -151,28 +120,22 @@ def module_rank(registry: Any, module: str | None) -> int:
 
 
 def candidate_models(target: Target) -> list[str]:
-    """The target's model, else its candidate models (ambiguous receiver), best first."""
     if target.model:
         return [target.model]
     return list(dict.fromkeys(target.models or ()))[:MAX_CANDIDATE_MODELS]
 
 
+# Shared by findReferences and incomingCalls; "" in models = a framework (BaseModel) member.
 def trust_unknown_receiver(registry: Any, name: str) -> bool:
-    """Whether a use of member ``name`` on a receiver whose model is unknown
-    may count as a use of its definitions: never for members of the framework
-    classes, else only when at most ``MAX_UNKNOWN_RECEIVER_MODELS`` models
-    define the name. Shared by findReferences and incomingCalls."""
     models = registry.models_with_member(name)
     return "" not in models and len(models) <= MAX_UNKNOWN_RECEIVER_MODELS
 
 
 def scopes(scope: frozenset[str] | None) -> tuple:
-    """Lookup scopes in fallback order: the dependency closure, then the whole env."""
     return (scope, None) if scope is not None else (None,)
 
 
 def scoped_lookup(lookup: Callable, model: str, name: str, scope: frozenset[str] | None) -> list[MemberDef]:
-    """``lookup(model, name, scope)`` falling back to the unscoped lookup when empty."""
     for sc in scopes(scope):
         defs = lookup(model, name, sc)
         if defs:
@@ -181,15 +144,13 @@ def scoped_lookup(lookup: Callable, model: str, name: str, scope: frozenset[str]
 
 
 def model_classes_ordered(registry: Any, model: str, scope: frozenset[str] | None) -> list[ClassRef]:
-    """Classes of ``model``: the defining class(es) first, then the extensions in
-    load order. The definition is shown even when it lives outside ``scope``
-    (module with a missing dependency)."""
     classes: list[ClassRef] = []
     for sc in scopes(scope):
         classes = registry.model_classes(model, sc)
         if classes:
             break
     defs = [c for c in classes if c.is_definition]
+    # show the definition even outside scope (module with a missing dependency)
     if not defs and scope is not None:
         defs = registry.model_definitions(model, None)
     return defs + [c for c in classes if not c.is_definition]
@@ -204,8 +165,6 @@ def defining_classes(registry: Any, model: str, scope: frozenset[str] | None) ->
 
 
 def field_comodel(registry: Any, model: str, name: str, scope: frozenset[str] | None, _depth: int = 0) -> str | None:
-    """Comodel of a relational field, following ``related`` paths (a related
-    many2one usually does not repeat its comodel)."""
     for sc in scopes(scope):
         info = registry.field_info(model, name, sc)
         if info is None:
@@ -228,10 +187,8 @@ def class_containing(classes: Iterable[ClassRef], path: str, line: int) -> Class
     return None
 
 
+# Defs below the current class in the MRO; [0] is what super() at ctx.path:line reaches.
 def super_definitions(ctx: Any, model: str, name: str, line: int) -> list[MemberDef]:
-    """Definitions ``super().name()`` written at ``line`` of ``ctx.path`` can
-    reach: the ones below the current class in the MRO of ``model``, the one the
-    call reaches first."""
     registry = ctx.registry
     for sc in scopes(ctx.scope):
         mro = registry.model_mro(model, sc)
@@ -249,16 +206,12 @@ def super_definitions(ctx: Any, model: str, name: str, line: int) -> list[Member
     return []
 
 
+# Base-most first (Claude reads top entries first); super().m(): the def it reaches comes first.
 def method_definitions(ctx: Any, target: Target, model: str) -> list[MemberDef]:
-    """Definitions of a METHOD target on ``model`` in navigation order."""
     if target.extra.get("super"):
         line = target.origin[0] if target.origin else ctx.line
         return super_definitions(ctx, model, target.name or "", line)
     return scoped_lookup(ctx.registry.method, model, target.name or "", ctx.scope)[::-1]
-
-
-# ---------------------------------------------------------------------------
-# definition
 
 
 def _definition_spots(ctx: Any, target: Target) -> Iterator[Spot]:
@@ -296,10 +249,6 @@ def _definition_spots(ctx: Any, target: Target) -> Iterator[Spot]:
             yield (target.path, target.line, target.col, target.end_col)
 
 
-# ---------------------------------------------------------------------------
-# type definition
-
-
 def _type_spots(ctx: Any, target: Target) -> Iterator[Spot]:
     registry, scope, kind = ctx.registry, ctx.scope, target.kind
     if kind == FIELD:
@@ -319,10 +268,6 @@ def _type_spots(ctx: Any, target: Target) -> Iterator[Spot]:
         for rec in registry.records(target.xmlid or "")[:1]:
             if rec.model:
                 yield from map(class_spot, defining_classes(registry, rec.model, scope))
-
-
-# ---------------------------------------------------------------------------
-# implementation
 
 
 def _implementation_spots(ctx: Any, target: Target) -> Iterator[Spot]:
@@ -355,13 +300,11 @@ def _implementation_spots(ctx: Any, target: Target) -> Iterator[Spot]:
 
 
 def _own_members(registry: Any, model: str, name: str, index: int, kind: str) -> list[MemberDef]:
-    """Definitions of ``name`` in the classes of ``model`` itself (all modules, load order)."""
     key = MEMBER_NAME[index]
     return [MemberDef(kind, name, c, m) for c in registry.model_classes(model) for m in c.facts[index] if m[key] == name]
 
 
 def descendants(registry: Any, model: str) -> set[str]:
-    """Models inheriting ``model`` as a parent, recursively (every model for ``base``)."""
     if model == "base":
         return set(registry.model_names()) - {"base"}
     out: set[str] = set()
@@ -375,8 +318,6 @@ def descendants(registry: Any, model: str) -> set[str]:
 
 
 def _descendant_members(registry: Any, model: str, name: str, index: int, kind: str, delegation: bool = False) -> list[MemberDef]:
-    """(Re)definitions of ``name`` in models inheriting ``model`` (``delegation``:
-    also in models delegating to it through ``_inherits``), load order."""
     candidates = [m for m in registry.models_with_member(name) if m and m != model]
     if not candidates:
         return []
@@ -392,25 +333,18 @@ def _descendant_members(registry: Any, model: str, name: str, index: int, kind: 
     return out
 
 
+# Own classes (load order), then overrides in inheriting models, then inherited defs (super() order).
 def method_implementations(registry: Any, model: str, name: str) -> list[MemberDef]:
-    """Every definition of method ``name`` that can run for ``model``, in any
-    module: the model's own classes (load order), overrides in models inheriting
-    it (e.g. ``mail.thread.message_post`` overridden by ``sale.order``), then the
-    implementations it inherits (MRO order)."""
     own = _own_members(registry, model, name, K_METHODS, "method")
     inherited = [d for d in registry.method(model, name) if d.cls.model != model]
     return own + _descendant_members(registry, model, name, K_METHODS, "method") + inherited
 
 
 def field_implementations(registry: Any, model: str, name: str) -> list[MemberDef]:
-    """Every (re)definition of field ``name`` of ``model`` in any module, base-most
-    first, then redefinitions in inheriting / delegating models."""
     return registry.field(model, name)[::-1] + _descendant_members(registry, model, name, K_FIELDS, "field", delegation=True)
 
 
 def model_implementations(registry: Any, model: str) -> list[ClassRef]:
-    """All classes of ``model`` (definition first) and the classes of other models
-    listing it in their ``_inherit``."""
     classes = registry.model_classes(model)
     own = [c for c in classes if c.is_definition] + [c for c in classes if not c.is_definition]
     kids = [c for child in registry.model_children(model) for c in registry.model_classes(child) if model in c.parents()]
@@ -419,8 +353,6 @@ def model_implementations(registry: Any, model: str) -> list[ClassRef]:
 
 
 def view_implementations(registry: Any, key: str) -> list[RecordRef]:
-    """Views / templates inheriting ``key`` (breadth first, load order per level),
-    then the other definitions of the same xml id (updates from other modules)."""
     out: list[RecordRef] = []
     seen = {key}
     level = [key]
@@ -439,10 +371,8 @@ def view_implementations(registry: Any, key: str) -> list[RecordRef]:
     return out + registry.records(key)[1:]
 
 
+# Extension-mode t-inherit only; primary inheritors (own t-name) come from children_views.
 def template_extensions(registry: Any, name: str) -> list[RefHit]:
-    """``t-inherit`` references to client template ``name`` from templates
-    without a t-name of their own (``t-inherit-mode="extension"``); primary
-    inheritors are records, listed by ``children_views``."""
     primary = [(r.path, r.line) for r in registry.children_views(name)]
     return [
         h
@@ -453,8 +383,6 @@ def template_extensions(registry: Any, name: str) -> list[RefHit]:
 
 
 def module_dependent_spots(registry: Any, name: str) -> list[Spot]:
-    """Manifests of the modules depending on ``name``: direct dependents first
-    (at their ``depends`` entry), then the transitive ones."""
     dependents = registry.dependents(name)
     if not dependents:
         return []
@@ -469,14 +397,7 @@ def module_dependent_spots(registry: Any, name: str) -> list[Spot]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# plain Python classes (controllers, helpers...): subclasses and overrides
-
-
 def python_implementation_spots(registry: Any, path: str, line: int, name: str) -> list[Spot]:
-    """Subclasses of the class defined at ``path:line``, or for a method of a
-    class: the method then its overrides in the subclasses (e.g. a controller
-    route overridden by other modules)."""
     for cls in (registry.file_facts(path) or {}).get(CLASSES) or ():
         if cls[K_LINE] == line and cls[K_NAME] == name:
             return [(p, c[K_LINE], c[K_COL], c[K_END_COL]) for p, c in python_subclasses(registry, path, name)]
@@ -490,9 +411,6 @@ def python_implementation_spots(registry: Any, path: str, line: int, name: str) 
 
 
 def python_subclasses(registry: Any, path: str, name: str) -> list[tuple[str, tuple]]:
-    """``(path, Class tuple)`` of the classes deriving from class ``name`` of
-    ``path``, breadth first: a base matches when it resolves, through the
-    imports of its file, to the same dotted name as the class."""
     origin = registry.py_dotted_name(path)
     if not origin:
         return []
@@ -524,7 +442,6 @@ def python_subclasses(registry: Any, path: str, name: str) -> list[tuple[str, tu
 
 
 def absolute_module(registry: Any, path: str, module: str, level: int) -> str:
-    """Dotted module of an import statement of ``path`` (resolves relative imports)."""
     if not level:
         return module
     parts = (registry.py_dotted_name(path) or "").split(".")
@@ -533,9 +450,6 @@ def absolute_module(registry: Any, path: str, module: str, level: int) -> str:
 
 
 def base_dotted(registry: Any, path: str, facts: dict, base: str) -> str | None:
-    """Dotted name a base-class expression of ``path`` refers to (``main.WebsiteSale``
-    with ``from odoo.addons.website_sale.controllers import main`` ->
-    ``odoo.addons.website_sale.controllers.main.WebsiteSale``)."""
     head, _, rest = base.partition(".")
     for imp in facts.get(IMPORTS) or ():
         if imp[I_NAME] == "*" or (imp[I_ASNAME] or imp[I_NAME] or imp[I_MODULE].split(".")[0]) != head:
@@ -550,8 +464,6 @@ def base_dotted(registry: Any, path: str, facts: dict, base: str) -> str | None:
 
 
 def canonical_class(registry: Any, dotted: str | None, hops: int = 3) -> str | None:
-    """Follow re-exports (``from .main import WebsiteSale`` in a package) to the
-    module that defines the class."""
     for _ in range(hops):
         if not dotted:
             return dotted

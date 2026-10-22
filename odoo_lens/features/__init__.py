@@ -1,18 +1,8 @@
-"""Feature entry points called by the server. Each takes a RequestContext
-(``odoo_lens.server.RequestContext``) and returns LSP-shaped JSON values; all
-positions are already UTF-16 based.
-
-The submodules are imported eagerly, BEFORE the entry points are defined:
-importing a submodule binds it as an attribute of this package, and three of
-them share their name with an entry point (hover, references, diagnostics). A
-lazy import inside an entry point would therefore replace the function with the
-module on first use.
-"""
-
 from __future__ import annotations
 
 from typing import Any
 
+# Import eagerly, before the defs: a lazy submodule import would rebind hover/references/diagnostics.
 from . import calls as _calls
 from . import diagnostics as _diagnostics
 from . import hover as _hover

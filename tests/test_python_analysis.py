@@ -1,11 +1,3 @@
-"""Tests of odoo_lens.analysis.python (Odoo-aware Python analysis).
-
-Fixture: tests/fixtures/mini (see scripts/make_fixture.py for the content and
-line numbers). Extra code samples are opened as in-memory documents under
-custom/my_module (never written to disk). Real-tree checks run when
-~/odev/worktrees/<version> (or $ODOO_LENS_WORKTREES/<version>) exists.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -75,13 +67,10 @@ class TestFixture(_Base):
         gc.collect()
 
     def virtual(self, name: str, text: str) -> str:
-        """An in-memory document of my_module (not written to disk)."""
         path = os.path.join(MINI, "custom", "my_module", "models", name)
         self.server.documents.open(path_to_uri(path), text, 1, "python")
         self.opened.append(path)
         return path
-
-    # -- facts refs (A) --------------------------------------------------------
 
     def test_env_ref_xmlid(self):
         t = self.one(CUSTOM, 17, "base.main_company", 3)
@@ -108,10 +97,7 @@ class TestFixture(_Base):
         t = self.one(SALE, 8, "date_order")
         self.assertEqual((t.kind, t.model, t.name), (FIELD, "sale.order", "date_order"))
 
-    # -- inference (C) ------------------------------------------------------------
-
     def test_chain_from_env_ref(self):
-        # company = self.env.ref('base.main_company'); company.partner_id.email
         t = self.one(CUSTOM, 20, "partner_id")
         self.assertEqual((t.kind, t.model, t.name), (FIELD, "res.company", "partner_id"))
         t = self.one(CUSTOM, 20, "email", 1, nth=1)
@@ -183,8 +169,6 @@ class TestFixture(_Base):
         self.assertTrue(t.path.endswith("odoo/odoo/api.py"))
         self.assertEqual(t.extra.get("value_models"), ["res.company"])
 
-    # -- generic python ---------------------------------------------------------------
-
     def test_imported_function(self):
         t = self.one(SALE, 27, "float_compare", 2)
         self.assertEqual((t.kind, t.path, t.name, t.line), (PYSYM, FLOAT_UTILS, "float_compare", 4))
@@ -216,31 +200,22 @@ class TestFixture(_Base):
         t = self.one(SALE, 35, "vals_list)", 1)
         self.assertEqual((t.kind, t.line, t.extra.get("symbol_kind")), (PYSYM, 34, "param"))
 
-    # -- leniency / tokens -----------------------------------------------------------
-
     def test_leniency(self):
-        # on the quotes around the xml id string, and on the closing parenthesis
         for col in (self.col(CUSTOM, 17, "'base"), self.col(CUSTOM, 17, "')"), self.col(CUSTOM, 17, "')") + 1):
             res = self.targets(CUSTOM, 17, col)
             self.assertEqual([(t.kind, t.xmlid) for t in res], [(XMLID, "base.main_company")], col)
-        # on the parenthesis right after ``ref``: ``ref`` is closer than the string
         res = self.at(CUSTOM, 17, "('base")
         self.assertEqual([(t.kind, t.name) for t in res], [(PYSYM, "ref")])
-        # on the parenthesis / dot right after a method name
         res = self.at(CUSTOM, 22, "()", 0, nth=1)
         self.assertEqual([(t.kind, t.name) for t in res], [(METHOD, "action_confirm")])
-        # on the 'return' keyword: nearest meaningful token (super is a builtin)
         res = self.at(CUSTOM, 22, "return", 2)
         self.assertEqual([(t.kind, t.name) for t in res], [(METHOD, "action_confirm")])
-        # on the dot between two attributes: the attribute after it
         res = self.at(CUSTOM, 20, ".email", 0, nth=1)
         self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "res.partner", "email")])
 
     def test_nothing_on_blank_or_past_end(self):
         self.assertEqual(self.targets(CUSTOM, 15, 0), [])
         self.assertEqual(self.targets(CUSTOM, 999, 0), [])
-
-    # -- virtual documents ---------------------------------------------------------------
 
     def test_comment_and_keywords(self):
         path = self.virtual("t_comment.py", (
@@ -287,22 +262,22 @@ class TestFixture(_Base):
             "        return super().create(vals_list)\n"
         ))
         cases = [
-            (7, "email", (FIELD, "res.partner", "email")),  # domain in a variable, consumed by search
+            (7, "email", (FIELD, "res.partner", "email")),
             (7, "partner_id", (FIELD, "sale.order", "partner_id")),
-            (8, "date_order", (FIELD, "sale.order", "date_order")),  # order=
-            (9, "order_line", (FIELD, "sale.order", "order_line")),  # write() values key
-            (9, "product_id", (FIELD, "sale.order.line", "product_id")),  # (0, 0, vals) of an x2many key
-            (9, "price_unit", (FIELD, "sale.order.line", "price_unit")),  # Command.create(vals)
-            (10, "partner_id", (FIELD, "sale.order", "partner_id")),  # with_context(default_<field>=)
-            (11, "partner_id", (FIELD, "sale.order", "partner_id")),  # _fields['...']
-            (12, "date_order", (FIELD, "sale.order", "date_order")),  # read([...])
-            (13, "partner_id", (FIELD, "sale.order", "partner_id")),  # _read_group groupby
-            (14, "email", (FIELD, "res.partner", "email")),  # _read_group tuples
-            (16, "email", (FIELD, "res.partner", "email")),  # grouped().items()
-            (17, "date_order", (FIELD, "sale.order", "date_order")),  # sorted('...')
-            (17, "state", (FIELD, "sale.order", "state")),  # filtered_domain
-            (21, "partner_id", (FIELD, "sale.order", "partner_id")),  # 'x' in vals (create override)
-            (22, "date_order", (FIELD, "sale.order", "date_order")),  # vals['x'] = ...
+            (8, "date_order", (FIELD, "sale.order", "date_order")),
+            (9, "order_line", (FIELD, "sale.order", "order_line")),
+            (9, "product_id", (FIELD, "sale.order.line", "product_id")),
+            (9, "price_unit", (FIELD, "sale.order.line", "price_unit")),
+            (10, "partner_id", (FIELD, "sale.order", "partner_id")),
+            (11, "partner_id", (FIELD, "sale.order", "partner_id")),
+            (12, "date_order", (FIELD, "sale.order", "date_order")),
+            (13, "partner_id", (FIELD, "sale.order", "partner_id")),
+            (14, "email", (FIELD, "res.partner", "email")),
+            (16, "email", (FIELD, "res.partner", "email")),
+            (17, "date_order", (FIELD, "sale.order", "date_order")),
+            (17, "state", (FIELD, "sale.order", "state")),
+            (21, "partner_id", (FIELD, "sale.order", "partner_id")),
+            (22, "date_order", (FIELD, "sale.order", "date_order")),
         ]
         for line, needle, expected in cases:
             res = self.at(path, line, needle, 1)
@@ -329,7 +304,7 @@ class TestFixture(_Base):
         self.assertFalse(t.extra.get("inferred"))
         t = self.one(path, 8, "company_id", 1)
         self.assertEqual((t.kind, t.model, t.name), (FIELD, None, "company_id"))
-        self.assertEqual(t.models[0], "sale.order")  # the current model ranks first
+        self.assertEqual(t.models[0], "sale.order")
         self.assertIn("res.partner", t.models)
         self.assertEqual(self.at(path, 9, "upper"), [])
 
@@ -355,7 +330,7 @@ class TestFixture(_Base):
         self.assertEqual(self.at(path, 8, "add"), [])
         t = self.one(path, 15, "email")
         self.assertEqual((t.kind, t.model), (FIELD, "res.partner"))
-        t = self.one(path, 13, "email")  # loop-carried assignment
+        t = self.one(path, 13, "email")
         self.assertEqual((t.kind, t.model), (FIELD, "res.partner"))
 
     def test_python_classes_and_request(self):
@@ -380,8 +355,8 @@ class TestFixture(_Base):
         t = self.one(path, 9, "email")
         self.assertEqual((t.kind, t.model, t.name), (FIELD, "res.partner", "email"))
         t = self.one(path, 9, "partner")
-        self.assertEqual((t.kind, t.line), (PYSYM, 6))  # first assignment of self.partner
-        t = self.one(path, 10, "country_id")  # annotation
+        self.assertEqual((t.kind, t.line), (PYSYM, 6))
+        t = self.one(path, 10, "country_id")
         self.assertEqual((t.kind, t.model, t.name), (FIELD, "res.partner", "country_id"))
         t = self.one(path, 11, "email")
         self.assertEqual((t.kind, t.model, t.name), (FIELD, "res.partner", "email"))
@@ -444,14 +419,11 @@ class TestFixture(_Base):
         src = text.encode()
         enc = pa.enclosing_function(self.reg, path, src, line0)
         self.assertEqual((enc["name"], enc["model"]), ("target", "sale.order"))
-        # repeated requests end up parsing the whole file once
         for i in range(pa.PARTIAL_MAX_USES + 1):
             self.targets(path, 7 + 3 * i, 12)
         self.assertTrue(any(len(k) == 3 and k[0] == path for k in pa._FILES))
         res = self.targets(path, line0, self.col(path, line0, "active") + 1)
         self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "product.product", "active")])
-
-    # -- member_usages / calls_in_function / enclosing_function --------------------
 
     def source(self, path: str) -> bytes:
         with open(path, "rb") as fh:
@@ -513,7 +485,7 @@ class TestFixture(_Base):
             "model": "sale.order", "class": "SaleOrder", "name": "action_confirm",
             "line": 24, "col": 8, "end_col": 22, "end_line": 31,
         })
-        enc = pa.enclosing_function(self.reg, SALE, src, 33)  # decorator line
+        enc = pa.enclosing_function(self.reg, SALE, src, 33)
         self.assertEqual((enc["name"], enc["line"]), ("create", 34))
         self.assertIsNone(pa.enclosing_function(self.reg, SALE, src, 4))
         self.assertIsNone(pa.enclosing_function(self.reg, SALE, src, 17))
@@ -527,10 +499,6 @@ class TestFixture(_Base):
         pa.member_usages(self.reg, SALE, src, "partner_id")
         key = (SALE, len(src), hash(src))
         self.assertIn(key, pa._FILES)
-
-
-# ---------------------------------------------------------------------------
-# real trees
 
 
 def _find(path: str, needle: str) -> tuple[int, int]:
@@ -577,7 +545,6 @@ class _RealTree(_Base):
     def check_sale_order(self):
         res = self.target_at_needle("odoo/addons/sale/models/sale_order.py", "self.partner_id", 6)
         self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "sale.order", "partner_id")])
-        # super(SaleOrder, self)._action_confirm() in sale_stock (all versions)
         res = self.target_at_needle("odoo/addons/sale_stock/models/sale_order.py", "super(SaleOrder, self)._action_confirm()", 24)
         self.assertEqual([(t.kind, t.model, t.name, t.extra.get("super")) for t in res], [(METHOD, "sale.order", "_action_confirm", True)])
         res = self.target_at_needle("odoo/addons/sale/models/sale_order.py", "self.env.company", 10)
@@ -640,7 +607,6 @@ class TestReal18(_RealTree):
         self.check_sale_order()
 
     def test_test_class_attributes(self):
-        # cls.partner_a = cls.env['res.partner'].create(...) in AccountTestInvoicingCommon.setUpClass
         rel = "odoo/addons/account/tests/test_account_move_out_invoice.py"
         res = self.target_at_needle(rel, "self.partner_a.id", 5)
         self.assertEqual([(t.kind, t.name) for t in res], [(PYSYM, "partner_a")])
@@ -649,7 +615,6 @@ class TestReal18(_RealTree):
         self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "res.partner", "id")])
 
     def test_related_comodel(self):
-        # sale.order.line.company_id = fields.Many2one(related='order_id.company_id')
         res = self.target_at_needle("odoo/addons/sale/models/sale_order_line.py", "self.company_id.sale_discount_product_id", 16)
         self.assertEqual([(t.kind, t.model, t.name) for t in res], [(FIELD, "res.company", "sale_discount_product_id")])
 

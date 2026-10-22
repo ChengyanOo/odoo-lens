@@ -1,11 +1,3 @@
-"""Regression tests of the Python-analysis review findings (py-01 .. py-14).
-
-Positions are found by searching needles in the real sources, so the tests
-survive small upstream changes. Code samples are opened as in-memory documents
-(never written to disk). Real-tree tests run when
-~/odev/worktrees/<version> (or $ODOO_LENS_WORKTREES/<version>) exists.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -52,7 +44,7 @@ class TolerantParseTest(unittest.TestCase):
         self.assertIn("f", names)
         self.assertIn("h", names)
         h = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "h")
-        self.assertEqual(h.lineno, src.split(b"\n").index(b"    def h(self):") + 1)  # line numbers preserved
+        self.assertEqual(h.lineno, src.split(b"\n").index(b"    def h(self):") + 1)
         return tree
 
     def test_unclosed_paren(self):
@@ -104,7 +96,7 @@ class LoadOrderTest(unittest.TestCase):
 
         mods = self.modules({"base": (), "a": ("base",), "b": ("a",), "c": ("base",), "test_a": ("a", "c"), "z": ("b",)})
         keys = _load_keys(mods, test_rule=True)
-        # test_a: right after c (its last loaded dependency), before b (depth 2)
+        # test_a right after c (its last loaded dependency), before b (depth 2)
         self.assertEqual(sorted(mods, key=keys.__getitem__), ["base", "a", "c", "test_a", "b", "z"])
         self.assertEqual(keys["test_a"], (1, "c test_a"))
 
@@ -173,7 +165,6 @@ class _Real(unittest.TestCase):
 class Review18Test(_Real):
     version = "18.0"
 
-    # py-01: no arbitrary model for BaseModel members of unknown receivers; dict keys typed
     def test_unknown_receiver_base_member_not_pinned(self):
         path = self.virtual(
             "odoo/addons/sale/models/_probe_py01.py",
@@ -182,11 +173,10 @@ class Review18Test(_Real):
             "        a = thing.id\n"
             "        b = other.filtered(lambda r: r).exists()\n",
         )
-        self.assertEqual(pa.targets_at(self.ctx(path, 7, 19)), [])  # thing.id
-        self.assertEqual(pa.targets_at(self.ctx(path, 8, 21)), [])  # other.filtered
+        self.assertEqual(pa.targets_at(self.ctx(path, 7, 19)), [])
+        self.assertEqual(pa.targets_at(self.ctx(path, 8, 21)), [])
 
     def test_dict_keys_are_typed(self):
-        # lines_by_company[line.company_id] += line ... for company, lines in lines_by_company.items()
         res = self.targets("odoo/addons/sale/models/sale_order_line.py", "company.id", 8, after="def _compute_tax_id")
         self.assertEqual(self.kmn(res), [(FIELD, "res.company", "id")])
 
@@ -205,12 +195,10 @@ class Review18Test(_Real):
         self.assertIn("guessed", md)
         self.assertIn("crm.stage", md)
 
-    # py-02: domain= of a non-ORM method does not filter the receiver
     def test_domain_kwarg_of_other_method(self):
         res = self.targets("odoo/addons/crm/models/crm_lead.py", "('fold', '=', False)", 2, after="_stage_find(domain=")
         self.assertEqual(self.kmn(res), [(FIELD, "crm.stage", "fold")])
 
-    # py-03: 3-string tuples that are not domain leaves
     def test_selection_tuple_is_not_a_leaf(self):
         res = self.targets("odoo/addons/stock/models/stock_picking.py", "('assigned', 'done', 'cancel')", 2)
         self.assertEqual(res, [])
@@ -219,7 +207,6 @@ class Review18Test(_Real):
         res = self.targets("odoo/addons/link_tracker/models/link_tracker.py", "('code', 'unique( code )'", 2)
         self.assertEqual(res, [])
 
-    # py-04: no snapping out of strings; super resolves like the attribute
     def test_no_snap_from_unresolved_string(self):
         res = self.targets("odoo/addons/sale/models/sale_order.py", "'partner_id': self.partner_invoice_id.id", 3)
         self.assertEqual(res, [])
@@ -243,7 +230,6 @@ class Review18Test(_Real):
         res = self.targets("odoo/addons/sale_stock/models/sale_order.py", "_get_model_defaults('sale.order')", 22)
         self.assertEqual(self.kmn(res), [("model", "sale.order", None)])
 
-    # py-05: a syntax error elsewhere keeps the file analysable
     def test_broken_buffer(self):
         rel = "odoo/addons/sale/models/sale_order.py"
         path = self.path(rel)
@@ -261,7 +247,6 @@ class Review18Test(_Real):
         finally:
             self.server.documents.close(path_to_uri(path))
 
-    # py-06: hover shows the inferred model of a variable
     def test_variable_hover_shows_model(self):
         ctx = self.at("odoo/addons/sale/models/sale_order.py", "for order in self:", 4)
         md = features.hover(ctx)["contents"]["value"]
@@ -272,38 +257,32 @@ class Review18Test(_Real):
         md = features.hover(ctx)["contents"]["value"]
         self.assertIn("field values of **sale.order**", md)
 
-    # py-07: search methods return domains on their own model
     def test_search_method_domain(self):
         rel = "odoo/addons/sale/models/sale_order_line.py"
         needle = "return [('product_id.product_tmpl_id', operator, value)]"
         self.assertEqual(self.kmn(self.targets(rel, needle, 10)), [(FIELD, "sale.order.line", "product_id")])
         self.assertEqual(self.kmn(self.targets(rel, needle, 22)), [(FIELD, "product.product", "product_tmpl_id")])
 
-    # py-08: env.context / env.cr
     def test_env_members(self):
         ctx = self.at("odoo/addons/sale/models/sale_order.py", "self.env.context.get(", 10)
         locs = features.definition(ctx)
         locs = locs if isinstance(locs, list) else [locs]
         self.assertTrue(locs and locs[0]["uri"].endswith("/odoo/odoo/api.py"), locs)
 
-    # py-09: getattr strings may name any member
     def test_getattr_attribute(self):
         res = self.targets("odoo/addons/mail/models/mail_thread.py", "getattr(DocModel, '_mail_post_access'", 19)
         self.assertEqual(self.kmn(res), [(ATTR, "mail.thread", "_mail_post_access")])
 
-    # py-11: super() reaching a class attribute
     def test_super_attribute(self):
         ctx = self.at("odoo/addons/account/models/account_move.py", "super()._sequence_monthly_regex", 9)
         locs = features.definition(ctx)
         locs = locs if isinstance(locs, list) else [locs]
         self.assertTrue(locs and locs[0]["uri"].endswith("/account/models/sequence_mixin.py"), locs)
 
-    # py-12: read_group order with aggregate
     def test_order_with_aggregate(self):
         res = self.targets("odoo/addons/crm/models/crm_lead.py", "order='date_deadline:min ASC", 8)
         self.assertEqual(self.kmn(res), [(FIELD, "mail.activity", "date_deadline")])
 
-    # py-13: values keys through containers and variables
     def test_vals_through_containers(self):
         path = self.virtual(
             "odoo/addons/sale/models/_probe_py13.py",
@@ -335,20 +314,18 @@ class Review18Test(_Real):
             res = pa.targets_at(self.ctx(path, line, col))
             self.assertEqual(self.kmn(res), [(FIELD, model, name)], needle)
 
-    # symbols follow-ups: actions listed in a model's Action / Print menu; hover of bound actions
     def test_action_menu_bindings(self):
         from odoo_lens.protocol import NEVER_CANCELLED
 
         res = features.workspace_symbols(self.server, self.env, self.env.registry, "action:sale.order", NEVER_CANCELLED)
         by_name = {r["name"]: r.get("containerName", "") for r in res}
-        self.assertIn("sale.action_view_sale_advance_payment_inv", by_name)  # res_model sale.advance.payment.inv
+        self.assertIn("sale.action_view_sale_advance_payment_inv", by_name)
         self.assertIn("Action menu of sale.order", by_name["sale.action_view_sale_advance_payment_inv"])
         self.assertIn("Print menu of sale.order", by_name["sale.action_report_saleorder"])
         md = features.hover(self.at("odoo/addons/sale/views/sale_order_views.xml", 'id="model_sale_order_action_quotation_sent"', 5))["contents"]["value"]
         self.assertIn("Model: **sale.order**", md)
         self.assertIn("Action menu of **sale.order**", md)
 
-    # live-session gap: the call order when every overriding module is installed
     def test_full_install_call_order(self):
         ctx = self.at("odoo/addons/sale_stock/models/sale_order.py", "def _action_confirm", 6)
         md = features.hover(ctx)["contents"]["value"]
@@ -356,12 +333,11 @@ class Review18Test(_Real):
         section = md.split("**Call order with every module installed**", 1)[1]
         order = [line.split("**")[1] for line in section.split("\n") if line[:1].isdigit()]
         self.assertEqual(order[-1], "sale")
-        # sale_stock (depth n) runs before delivery and after repair (repair depends on sale_stock)
+        # repair depends on sale_stock: its override runs first
         self.assertLess(order.index("repair"), order.index("sale_stock"))
         self.assertLess(order.index("sale_stock"), order.index("delivery"))  # same depth, name order reversed
         self.assertIn("*(not a dependency)*", section)
 
-    # py-14: Form proxies in tests
     def test_form_proxies(self):
         rel = "odoo/addons/sale/tests/test_sale_order.py"
         res = self.targets(rel, "sol_form.product_id = ", 10, after="with Form(sol) as sol_form")
@@ -394,7 +370,6 @@ class Review16Test(_Real):
 class Review20Test(_Real):
     version = "20.0"
 
-    # py-10: default_<x> for a consumer without field x is a plain context key
     def test_default_key_without_field(self):
         res = self.targets("odoo/addons/sale/models/sale_order.py", "with_context(default_team_id=", 13, after='.env["crm.team"]')
         self.assertEqual(res, [])

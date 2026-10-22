@@ -1,6 +1,3 @@
-"""Tests for features/navigation.py (definition, type definition, implementation)
-and features/calls.py (call hierarchy), on the mini fixture and real checkouts."""
-
 from __future__ import annotations
 
 import gc
@@ -43,7 +40,6 @@ SALE_VIEWS = "odoo/addons/sale/views/sale_order_views.xml"
 
 
 def at(root: str, rel: str, needle: str, nth: int = 0) -> tuple[int, int]:
-    """1-based (line, col) of the nth occurrence of ``needle`` in ``root/rel``."""
     with open(os.path.join(root, rel), encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     seen = 0
@@ -58,13 +54,11 @@ def at(root: str, rel: str, needle: str, nth: int = 0) -> tuple[int, int]:
 
 
 def item_ctx(server, env, item: dict) -> RequestContext:
-    """The context the server builds for incoming/outgoing calls of ``item``."""
     start = item["selectionRange"]["start"]
     return RequestContext(server, env, env.registry, uri_to_path(item["uri"]), start["line"], start["character"])
 
 
 def spots(locs: list[dict], root: str = MINI) -> list[tuple[str, int, int]]:
-    """(path relative to ``root``, 1-based line, 1-based col) of LSP locations."""
     return [
         (os.path.relpath(uri_to_path(loc["uri"]), root), loc["range"]["start"]["line"] + 1, loc["range"]["start"]["character"] + 1)
         for loc in locs
@@ -89,7 +83,6 @@ class FixtureCase(unittest.TestCase):
 
 class DefinitionTest(FixtureCase):
     def test_field_definition_scoped_to_dependencies(self):
-        # sale_stock also redefines partner_id but is not a dependency of my_module
         locs = locations_for_target(self.ctx(MY), Target(FIELD, model="sale.order", name="partner_id"))
         self.assertEqual(spots(locs), [self.spot(SALE, "partner_id =")])
 
@@ -127,7 +120,7 @@ class DefinitionTest(FixtureCase):
         locs = locations_for_target(self.ctx(MY), Target(MODEL, model="sale.order"))
         self.assertEqual(spots(locs), [self.spot(SALE, "SaleOrder"), self.spot(MY, "SaleOrder")])
         everywhere = locations_for_target(self.ctx(MODELS), Target(MODEL, model="sale.order"))
-        self.assertEqual(len(everywhere), 4)  # framework file: no scope
+        self.assertEqual(len(everywhere), 4)
         self.assertEqual(spots(everywhere)[0], self.spot(SALE, "SaleOrder"))
         outside = locations_for_target(self.ctx(MY), Target(MODEL, model="sale.subscription.plan"))
         self.assertEqual(spots(outside), [self.spot(SUBSCRIPTION, "SaleSubscriptionPlan")])
@@ -165,7 +158,6 @@ class ImplementationTest(FixtureCase):
         self.assertEqual({s[0] for s in locs}, {SALE, MY, SALE_STOCK, SUBSCRIPTION})
 
     def test_inherited_method_implementation(self):
-        # not defined on sale.order itself: the inherited implementation
         locs = spots(implementations_for_target(self.ctx(SALE), Target(METHOD, model="sale.order", name="message_post")))
         self.assertEqual(locs, [self.spot("odoo/addons/mail/models/mail_thread.py", "message_post(self")])
 
@@ -187,14 +179,12 @@ class ImplementationTest(FixtureCase):
         self.assertEqual({v[0] for v in views}, {"custom/my_module/views/sale_order_views.xml", "odoo/addons/sale_stock/views/sale_order_views.xml"})
         deps = spots(implementations_for_target(ctx, Target(MODULE, name="sale")))
         self.assertEqual([d[0] for d in deps], ["custom/my_module/__manifest__.py", "odoo/addons/sale_stock/__manifest__.py", "enterprise/sale_subscription/__manifest__.py"])
-        for rel, line, col in deps:  # the location is the 'sale' entry of the depends list
+        for rel, line, col in deps:
             self.assertEqual((line, col - 1), at(MINI, rel, "'sale'"))
         self.assertEqual(len(implementations_for_target(ctx, Target(MODULE, name="base"))), 6)
 
 
 class EntryPointTest(FixtureCase):
-    """The public entry points, through ``analysis.targets_at``."""
-
     def test_xml_view_field_and_button(self):
         my_view = "custom/my_module/views/sale_order_views.xml"
         ctx = self.ctx(my_view, 'name="partner_id"', offset=7)
@@ -235,11 +225,11 @@ class CallHierarchyTest(FixtureCase):
         self.assertEqual((item["name"], item["kind"], item["detail"]), ("sale.order.action_confirm", 6, "my_module"))
         self.assertEqual(item["data"], {"model": "sale.order", "name": "action_confirm"})
         line = at(self.root, MY, "def action_confirm")[0] - 1
-        self.assertEqual(item["range"]["start"], {"line": line, "character": 4})  # the def line, not decorators
+        self.assertEqual(item["range"]["start"], {"line": line, "character": 4})
         self.assertEqual(item["range"]["end"]["line"], at(self.root, MY, "return super().action_confirm()")[0] - 1)
         self.assertEqual(item["selectionRange"], {"start": {"line": line, "character": 8}, "end": {"line": line, "character": 22}})
         reached = prepare(self.ctx(MY, "super().action_confirm", offset=10))[0]
-        self.assertEqual(uri_to_path(reached["uri"]), os.path.join(self.root, SALE))  # what super() reaches
+        self.assertEqual(uri_to_path(reached["uri"]), os.path.join(self.root, SALE))
         enclosing = prepare(self.ctx(SALE, "return True"))[0]
         self.assertEqual(enclosing["name"], "sale.order.action_confirm")
         self.assertEqual(uri_to_path(enclosing["uri"]), os.path.join(self.root, SALE))
@@ -252,7 +242,6 @@ class CallHierarchyTest(FixtureCase):
             ("sale.order.action_confirm", SUBSCRIPTION, [at(self.root, SUBSCRIPTION, "action_confirm()")]),
             ("sale.view_order_form", SALE_VIEWS, [(at(self.root, SALE_VIEWS, '"action_confirm"')[0], at(self.root, SALE_VIEWS, '"action_confirm"')[1] + 1)]),
         ])
-        # an override's own super() call never reaches it, nor the overrides above it
         top = prepare(self.ctx(SUBSCRIPTION, "def action_confirm", offset=4))[0]
         self.assertEqual([c[0] for c in self.calls(incoming(self.item_ctx(top), top), "from")], ["sale.view_order_form"])
         mine = prepare(self.ctx(MY, "def action_confirm", offset=4))[0]
@@ -266,14 +255,11 @@ class CallHierarchyTest(FixtureCase):
         item = prepare(self.ctx(MY, "def action_confirm", offset=4))[0]
         self.assertEqual(self.calls(outgoing(self.item_ctx(item), item), "to"), [
             ("res.partner.search", MODELS, [at(self.root, MY, "search(")]),
-            ("sale.order.action_confirm", SALE, [at(self.root, MY, "action_confirm()")]),  # super(): the next definition below
+            ("sale.order.action_confirm", SALE, [at(self.root, MY, "action_confirm()")]),
         ])
 
 
 class ChildOverridesTest(FixtureCase):
-    """Overrides in models inheriting a mixin, on a copy of the fixture with an
-    extra module (built in a temporary directory with its own cache)."""
-
     EXTRA = {
         "custom/mail_ext/__init__.py": "from . import models\n",
         "custom/mail_ext/__manifest__.py": "{'name': 'Mail ext', 'version': '18.0.1.0.0', 'depends': ['sale'], 'license': 'LGPL-3'}\n",
@@ -357,15 +343,14 @@ class ChildOverridesTest(FixtureCase):
         ext = "custom/mail_ext/models/models.py"
         self.assertEqual(locs, [
             self.spot("odoo/addons/mail/models/mail_thread.py", "message_post(self"),
-            self.spot(ext, "message_post(self", 0),  # sale.order's override (same module: file order)
-            self.spot(ext, "message_post(self", 1),  # product.product's
+            self.spot(ext, "message_post(self", 0),
+            self.spot(ext, "message_post(self", 1),
         ])
 
     def test_incoming_with_untyped_receiver(self):
         ext = "custom/mail_ext/models/models.py"
         item = prepare(self.ctx(SALE, "def action_confirm", offset=4))[0]
         callers = {c["from"]["name"]: c for c in incoming(item_ctx(self.server, self.env, item), item)}
-        # ``orders`` is untyped, but action_confirm exists on one model only
         self.assertEqual(len(callers["product.product.confirm_orders"]["fromRanges"]), 2)
         self.assertEqual(uri_to_path(callers["product.product.confirm_orders"]["from"]["uri"]), os.path.join(self.root, ext))
 
@@ -375,7 +360,7 @@ class ChildOverridesTest(FixtureCase):
         line, col = at(self.root, main, "Main(")
         cls = Target(PYSYM, name="Main", path=os.path.join(self.root, main), line=line - 1, col=col - 1, end_col=col + 3)
         self.assertEqual(spots(implementations_for_target(ctx, cls), self.root), [
-            self.spot(main, "Sub("), self.spot(more, "More("), self.spot(more, "Deeper("),  # breadth first, imports resolved
+            self.spot(main, "Sub("), self.spot(more, "More("), self.spot(more, "Deeper("),
         ])
         line, col = at(self.root, main, "index")
         meth = Target(PYSYM, name="index", path=os.path.join(self.root, main), line=line - 1, col=col - 1, end_col=col + 4)
@@ -389,7 +374,6 @@ class ChildOverridesTest(FixtureCase):
     def test_mixin_field_redefined_in_child(self):
         locs = spots(implementations_for_target(self.ctx(MY), Target(FIELD, model="mail.thread", name="message_ids")), self.root)
         self.assertEqual(locs, [self.spot("odoo/addons/mail/models/mail_thread.py", "message_ids ="), self.spot("custom/mail_ext/models/models.py", "message_ids =")])
-        # on the child itself: the mixin's definition first, then the override
         own = spots(locations_for_target(self.ctx("custom/mail_ext/models/models.py"), Target(FIELD, model="sale.order", name="message_ids")), self.root)
         self.assertEqual(own, locs)
 

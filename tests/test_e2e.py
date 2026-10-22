@@ -1,11 +1,3 @@
-"""End-to-end: drive bin/odoo-lens over stdio exactly like Claude Code 2.1.x does.
-
-Claude Code sends the initialize params below verbatim, opens a file (didOpen
-with the disk content) before any request on it, syncs edits with a full-text
-didChange followed by didSave, never sends didClose/didChangeWatchedFiles and
-only reads push diagnostics.
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,6 +12,7 @@ from lsp_client import ROOT, LspClient, path_to_uri  # noqa: E402
 
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "mini")
 
+# initialize params and capabilities exactly as Claude Code 2.1.x sends them
 CLAUDE_CODE_CAPS = {
     "workspace": {"configuration": False, "workspaceFolders": False, "didChangeWatchedFiles": {"dynamicRegistration": False}},
     "textDocument": {
@@ -42,7 +35,6 @@ CLAUDE_CODE_CAPS = {
 
 
 def find(path: str, needle: str, nth: int = 0) -> tuple[int, int]:
-    """0-based (line, col) of the nth occurrence of ``needle`` in ``path``."""
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     seen = 0
@@ -101,8 +93,6 @@ class EndToEnd(unittest.TestCase):
         line, col = find(path, needle, nth)
         return self.client.at(method, path, line, col + offset, **extra)
 
-    # -- lifecycle ----------------------------------------------------------------
-
     def test_initialize_fast_and_capabilities(self):
         self.assertLess(self.init_ms, 1500)
         caps = self.init["capabilities"]
@@ -111,15 +101,12 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue(caps.get(key), key)
         self.assertEqual(caps["positionEncoding"], "utf-16")
 
-    # -- navigation -----------------------------------------------------------------
-
     def test_definition_of_inherited_model(self):
         res = as_list(self.request_at("textDocument/definition", self.custom, "'sale.order'", offset=3))
         self.assertTrue(res, "no definition")
         self.assertTrue(res[0]["uri"].endswith("odoo/addons/sale/models/sale_order.py"), res[0])
 
     def test_definition_of_field_through_chain(self):
-        # company = self.env.ref('base.main_company'); company.partner_id.email
         res = as_list(self.request_at("textDocument/definition", self.custom, "partner_id.email", offset=12))
         self.assertTrue(any(r["uri"].endswith("base/models/res_partner.py") for r in res), res)
 
@@ -158,8 +145,6 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(res[0]["name"], "sale.order")
         self.assertIn("range", res[0]["location"])
 
-    # -- diagnostics policy -----------------------------------------------------------
-
     def test_diagnostics_published_for_custom_module_on_open(self):
         self.client.open(self.custom)
         diags = self.client.wait_diagnostics(self.custom, timeout=20)
@@ -181,13 +166,14 @@ class EndToEnd(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         broken = text.replace("_inherit = ['mail.thread']", "_inherit = ['mail.threadd']")
-        with open(path, "w", encoding="utf-8") as fh:  # Claude's Edit tool writes the file first...
+        # Claude's Edit writes the file first, then sends didChange + didSave
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(broken)
-        self.client.change(path, broken, 2)  # ...then sends didChange + didSave
+        self.client.change(path, broken, 2)
         self.client.notify("textDocument/didSave", {"textDocument": {"uri": path_to_uri(path)}})
         diags = self.client.wait_diagnostics(path, timeout=20)
         self.assertTrue(diags and any(d.get("code") == "unknown-model" for d in diags), diags)
-        # file fixed behind the server's back (git checkout): the next request must see it
+        # changed on disk without didChange (git checkout): the next request must see it
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         line, col = find(path, "'mail.thread'")

@@ -1,6 +1,3 @@
-"""Focused diagnostics checks: the code of private button methods and
-``compute_sql=`` method references, on a copy of the mini fixture."""
-
 from __future__ import annotations
 
 import gc
@@ -93,7 +90,6 @@ VIEWS = "custom/fix_diag/views/views.xml"
 
 
 def position(path: str, needle: str) -> tuple[int, int]:
-    """0-based (line, col) of the first occurrence of ``needle`` in ``path``."""
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh.read().split("\n")):
             col = line.find(needle)
@@ -106,7 +102,6 @@ class TestFixDiagnostics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory(prefix="odoo-lens-fixdiag-")
-        # private cache: keep temp trees out of the shared cache
         cls._cache_env = os.environ.get("ODOO_LENS_CACHE_DIR")
         os.environ["ODOO_LENS_CACHE_DIR"] = os.path.join(cls._tmp.name, "cache")
         cls.root = os.path.join(cls._tmp.name, "mini")
@@ -138,8 +133,6 @@ class TestFixDiagnostics(unittest.TestCase):
         line, col = position(os.path.join(self.root, rel), needle)
         return [d for d in diags if d["range"]["start"] == {"line": line, "character": col}]
 
-    # -- features-18: private button methods ---------------------------------------
-
     def test_private_button_code(self):
         diags = diag_module.diagnostics(self.ctx(VIEWS))
         for needle in ("_private_action", "_private_missing", "_private_sale"):
@@ -151,8 +144,6 @@ class TestFixDiagnostics(unittest.TestCase):
         self.assertEqual([], self.at(diags, VIEWS, "action_ok"))
         self.assertEqual([], self.at(diags, VIEWS, "action_confirm"))
 
-    # -- features-3: compute_sql names a method --------------------------------------
-
     def test_compute_sql_role(self):
         self.assertIn("compute_sql", diag_module.PY_METHOD_ROLES)
         self.assertIn("compute_sql", diag_module.LATE_BOUND_ROLES)
@@ -161,7 +152,6 @@ class TestFixDiagnostics(unittest.TestCase):
         ctx = self.ctx(MODELS)
         facts = dict(ctx.facts)
         refs = list(facts.get(REFS) or ())
-        # the extractor may not emit compute_sql references yet: add them as it would
         for name in ("_compute_sql_total", "_compute_sql_nope"):
             if not any(r[R_KIND] == REF_METHOD and r[R_VALUE] == name for r in refs):
                 line, col = position(os.path.join(self.root, MODELS), name)

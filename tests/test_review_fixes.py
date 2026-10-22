@@ -1,6 +1,3 @@
-"""Regression tests for the issues found by the adversarial review (core, extractors,
-registry, server, diagnostics)."""
-
 from __future__ import annotations
 
 import gc
@@ -45,8 +42,8 @@ class B(models._Base[int]):
         f = extract_source("/m/x.py", "py", src)
         a, w, b = f[CLASSES]
         self.assertEqual(a[K_MODEL][MI_NAME], "test.a")
-        self.assertEqual(w[K_MODEL][MI_INHERIT], ["ir.module.module"])  # an extension, not a redefinition
-        self.assertEqual(b[5], ("models._Base",))  # subscripted base unwrapped
+        self.assertEqual(w[K_MODEL][MI_INHERIT], ["ir.module.module"])
+        self.assertEqual(b[5], ("models._Base",))
 
     def test_super_detection_is_per_method(self):
         src = b"""from odoo import models
@@ -126,7 +123,6 @@ class RegistryFixes(unittest.TestCase):
         shutil.copytree(MINI, cls.root)
         os.environ["ODOO_LENS_CACHE_DIR"] = os.path.join(cls.tmp, "cache")
         mail = os.path.join(cls.root, "odoo/addons/mail/models")
-        # a mixin with its own _description, listed BEFORE the model in an extension
         write(os.path.join(mail, "blacklist.py"), """from odoo import fields, models
 
 
@@ -143,7 +139,6 @@ class Partner(models.Model):
     _inherit = ['mail.thread.blacklist', 'res.partner']
 """)
         write(os.path.join(mail, "__init__.py"), "from . import mail_thread\nfrom . import blacklist\n")
-        # a record defined in a later data file is overridden by an earlier one alphabetically
         base = os.path.join(cls.root, "odoo/odoo/addons/base")
         write(os.path.join(base, "data/aaa_update.xml"), '<odoo><record id="main_partner" model="res.partner"><field name="email">x@y.z</field></record></odoo>\n')
         manifest = os.path.join(base, "__manifest__.py")
@@ -178,7 +173,7 @@ class Partner(models.Model):
 
     def test_records_in_manifest_order(self):
         recs = self.reg.records("base.main_partner")
-        self.assertTrue(recs[0].path.endswith("res_company_data.xml"))  # the creating record first
+        self.assertTrue(recs[0].path.endswith("res_company_data.xml"))
 
     def test_batch_update_rebuilds_once(self):
         reg = self.reg
@@ -309,7 +304,7 @@ class DiagnosticsFixes(unittest.TestCase):
         ds = self.diags("custom/my_module/views/disabled.xml")
         self.assertEqual([d["code"] for d in ds], ["not-loaded"])
         self.assertIn("commented out in __manifest__.py:", ds[0]["message"])
-        self.assertEqual(self.diags("custom/my_module/views/fixture.xml"), [])  # merely unlisted: left alone
+        self.assertEqual(self.diags("custom/my_module/views/fixture.xml"), [])
 
     def test_extension_only_model_and_studio_fields(self):
         ds = self.diags("custom/my_module/models/gone.py")

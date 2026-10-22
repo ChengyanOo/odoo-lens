@@ -1,14 +1,5 @@
-"""Open documents, file:// URIs and position-encoding helpers.
-
-Columns everywhere inside odoo-lens (facts, registry, features) are **UTF-16 code
-units**, the LSP default. Lines are 0-based. Python's ``ast`` and the regex
-scanners report UTF-8 byte columns / offsets. Extractors (and the registry)
-convert them with :class:`odoo_lens.extract.common.SrcIndex` (whole-source byte
-offsets and per-line byte columns); a single line is converted with
-:func:`bytecol_to_utf16`. On ASCII lines (the vast majority) every conversion is
-the identity.
-"""
-
+# Columns are UTF-16 code units everywhere, lines 0-based. ast/regex UTF-8 byte columns go through
+# extract.common.SrcIndex (whole source) or bytecol_to_utf16 (single line).
 from __future__ import annotations
 
 import os
@@ -17,11 +8,7 @@ import threading
 from collections import OrderedDict
 from typing import Any, Iterable
 
-# ---------------------------------------------------------------------------
-# URIs
-
-# Mirrors Node's url.pathToFileURL(): these characters stay literal, everything
-# else is percent-encoded as UTF-8 (so '#' -> %23, ' ' -> %20, '~' -> %7E).
+# Mirrors Node's url.pathToFileURL(): chars outside this set are %-encoded as UTF-8 ('#' -> %23).
 _URI_UNSAFE = re.compile(r"[^A-Za-z0-9\-._/@:;=&!$,+()*']")
 
 
@@ -42,22 +29,17 @@ def _unpct(match: re.Match) -> str:
 
 
 def uri_to_path(uri: str) -> str:
-    """``file:///a/%23b`` -> ``/a/#b``. Non-file URIs are returned unchanged."""
     if not uri.startswith("file:"):
         return uri
     rest = uri[5:]
     if rest.startswith("//"):
         rest = rest[2:]
         slash = rest.find("/")
-        rest = rest[slash:] if slash >= 0 else "/"  # drop authority ("localhost")
+        rest = rest[slash:] if slash >= 0 else "/"
     path = _PCT.sub(_unpct, rest)
     if os.name == "nt" and re.match(r"^/[A-Za-z]:", path):
         path = path[1:]
     return os.path.normpath(path)
-
-
-# ---------------------------------------------------------------------------
-# Position encodings
 
 
 def utf16_len(s: str) -> int:
@@ -67,7 +49,6 @@ def utf16_len(s: str) -> int:
 
 
 def utf16_to_index(line: str, col16: int) -> int:
-    """UTF-16 column -> str index within ``line`` (clamped)."""
     if col16 <= 0:
         return 0
     if line.isascii():
@@ -85,7 +66,6 @@ def index_to_utf16(line: str, index: int) -> int:
 
 
 def bytecol_to_utf16(line: bytes, bcol: int) -> int:
-    """UTF-8 byte column (as reported by ``ast``) -> UTF-16 column."""
     if bcol <= 0:
         return 0
     if line.isascii():
@@ -101,7 +81,6 @@ def utf16_to_bytecol(line: bytes, col16: int) -> int:
 
 
 def convert_col(line: str, col: int, src: str, dst: str) -> int:
-    """Convert a column between 'utf-16', 'utf-8' and 'utf-32' encodings."""
     if src == dst or line.isascii():
         return col
     if src == "utf-16":
@@ -117,13 +96,12 @@ def convert_col(line: str, col: int, src: str, dst: str) -> int:
     return idx
 
 
+# Same line numbers as LSP for '\n' and '\r\n'; a trailing '\r' stays on the line.
 def split_lines(text: str) -> list[str]:
-    """Split like LSP does for '\\n' and '\\r\\n' (a trailing '\\r' stays on the line)."""
     return text.split("\n")
 
 
 def offset_at(text: str, line: int, col16: int) -> int:
-    """(line, UTF-16 col) -> str offset into ``text`` (clamped)."""
     if line < 0:
         return 0
     start = 0
@@ -149,10 +127,6 @@ def apply_change(text: str, change: dict) -> str:
     return text[:s] + change["text"] + text[e:]
 
 
-# ---------------------------------------------------------------------------
-# Documents
-
-
 _REVISION = [0]
 
 
@@ -171,8 +145,8 @@ class Document:
         self.version = version
         self.language_id = language_id
         self._lines: list[str] | None = None
-        self.disk_stat = _stat(self.path)  # (mtime_ns, size) of the file when the text was last synced
-        self.rev = _next_rev()  # server-side revision: client versions can collide after a disk reload
+        self.disk_stat = _stat(self.path)
+        self.rev = _next_rev()  # server-side: client versions can collide after a disk reload
 
     @property
     def lines(self) -> list[str]:
@@ -192,15 +166,11 @@ class Document:
 
 
 class DocumentStore:
-    """Open documents (authoritative) plus a small validated cache of disk files."""
-
     def __init__(self, disk_cache_size: int = 96):
-        self._docs: dict[str, Document] = {}  # by path
+        self._docs: dict[str, Document] = {}
         self._disk: OrderedDict[str, tuple[int, int, str, list[str] | None]] = OrderedDict()
         self._disk_size = disk_cache_size
         self._lock = threading.Lock()
-
-    # LSP sync -------------------------------------------------------------
 
     def open(self, uri: str, text: str, version: int | None, language_id: str = "") -> Document:
         doc = Document(uri, text, version, language_id)
@@ -220,11 +190,8 @@ class DocumentStore:
     def close(self, uri: str) -> Document | None:
         return self._docs.pop(uri_to_path(uri), None)
 
+    # Claude Code sends no didClose/didChangeWatchedFiles: Bash/git edits would stay stale otherwise.
     def refresh_from_disk(self, path: str) -> bool:
-        """Reload an open document whose file changed on disk since its last sync.
-
-        Claude Code never sends didClose / didChangeWatchedFiles, so files edited by
-        Bash or git would otherwise stay stale forever. Returns True if reloaded."""
         doc = self._docs.get(path)
         if doc is None:
             return False
@@ -237,12 +204,10 @@ class DocumentStore:
         except OSError:
             return False
         if text != doc.text:
-            doc.set_text(text, doc.version)  # keep the client's version (only it may advance it)
+            doc.set_text(text, doc.version)  # only the client may advance its version
             return True
         doc.disk_stat = st
         return False
-
-    # access -----------------------------------------------------------------
 
     def get(self, path: str) -> Document | None:
         return self._docs.get(path)
@@ -258,7 +223,6 @@ class DocumentStore:
         return doc.uri if doc is not None else path_to_uri(path)
 
     def text(self, path: str) -> str | None:
-        """Current text: the open document's, else the file on disk (None if unreadable)."""
         doc = self._docs.get(path)
         if doc is not None:
             return doc.text

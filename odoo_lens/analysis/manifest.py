@@ -1,15 +1,3 @@
-"""``__manifest__.py`` analysis: targets under the cursor.
-
-* ``depends`` entries: the module;
-* ``data`` / ``demo`` (and legacy ``init_xml``/``update_xml``/``demo_xml``/``qweb``)
-  entries: the file, relative to the module directory (also when missing, so
-  that hover/diagnostics can say so);
-* ``assets`` entries: ``module/static/...`` paths (a leading ``/`` is allowed)
-  resolve against that module's directory; for globs, the deepest existing
-  directory before the first wildcard. Bundle names (``('include', 'web.x')``)
-  and directives are not files.
-"""
-
 from __future__ import annotations
 
 import os
@@ -55,13 +43,10 @@ def targets_at(ctx: Any) -> list[Target]:
 
 
 def is_asset_path(value: str) -> bool:
-    """A file path or glob (not a bundle name or a directive) of an ``assets`` list."""
     return ("/" in value or value.endswith(_ASSET_EXTS)) and "://" not in value
 
 
 def asset_path(registry: Any, value: str) -> str | None:
-    """File (or, for a glob, deepest existing directory) of an asset path
-    ``module/static/...``; None when the module is not part of the env."""
     module, _, rest = value.lstrip("/").partition("/")
     info = registry.module(module)
     if info is None or not rest:

@@ -1,6 +1,3 @@
-"""``__manifest__.py`` extractor: literal values plus positions of the entries
-that reference other things (dependencies, data files, assets)."""
-
 from __future__ import annotations
 
 import ast
@@ -24,7 +21,6 @@ from .common import SrcIndex
 
 
 def _pos(s: SrcIndex, node: ast.Constant) -> tuple[int, int, int] | None:
-    """Content range of a single-line string literal."""
     if node.lineno != node.end_lineno:
         return None
     l0 = node.lineno - 1
@@ -45,7 +41,7 @@ def _strings(s: SrcIndex, node: ast.AST) -> list[tuple]:
             p = _pos(s, e)
             if p is not None:
                 out.append((e.value, p[0], p[1], p[2]))
-        elif isinstance(e, (ast.Tuple, ast.List)):  # assets directives: ('include', 'web._assets_x')
+        elif isinstance(e, (ast.Tuple, ast.List)):  # asset directives: ('include', 'web._assets_x')
             for sub in e.elts:
                 if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
                     p = _pos(s, sub)

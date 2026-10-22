@@ -1,9 +1,3 @@
-"""Minimal synchronous LSP client used by the end-to-end tests and benchmarks.
-
-Spawns ``bin/odoo-lens`` as a subprocess and talks JSON-RPC over its stdio, the
-same way Claude Code does.
-"""
-
 from __future__ import annotations
 
 import json
@@ -44,8 +38,6 @@ class LspClient:
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
-    # -- transport ---------------------------------------------------------------
-
     def _send(self, obj: dict) -> None:
         body = json.dumps(obj).encode("utf-8")
         assert self.proc.stdin is not None
@@ -75,15 +67,13 @@ class LspClient:
                     q = self._responses.get(msg["id"])
                 if q is not None:
                     q.put(msg)
-            elif "id" in msg:  # server -> client request: answer with null
+            elif "id" in msg:
                 self.server_requests.append(msg)
                 self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
             else:
                 with self._notif_cond:
                     self.notifications.append(msg)
                     self._notif_cond.notify_all()
-
-    # -- API -----------------------------------------------------------------------
 
     def request(self, method: str, params: Any = None, timeout: float = 120.0) -> Any:
         with self._lock:

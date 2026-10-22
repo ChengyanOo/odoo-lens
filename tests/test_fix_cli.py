@@ -1,6 +1,3 @@
-"""Tests for the command line interface (odoo_lens/cli.py): query ops, call
-hierarchy contexts, symbols output limits and multi-env checks."""
-
 from __future__ import annotations
 
 import contextlib
@@ -34,7 +31,6 @@ def run(*argv: str) -> tuple[int, str, str]:
 
 
 def position(path: str, needle: str) -> tuple[int, int]:
-    """1-based (line, col) of the first ``needle`` in ``path``, as the CLI takes it."""
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh.read().split("\n")):
             col = line.find(needle)
@@ -46,7 +42,7 @@ def position(path: str, needle: str) -> tuple[int, int]:
 class TestQueryOps(unittest.TestCase):
     def test_targets_is_listed(self):
         self.assertIn("targets", cli.QUERY_OPS)
-        self.assertIn("|calls-out|targets", cli.__doc__)
+        self.assertEqual(("calls-out", "targets"), cli.QUERY_OPS[-2:])
 
     def test_unknown_op_is_rejected(self):
         with self.assertRaises(SystemExit) as cm:
@@ -61,8 +57,6 @@ class TestQueryOps(unittest.TestCase):
 
 
 class TestCallHierarchy(unittest.TestCase):
-    """calls-in / calls-out run on the item's definition, like the server."""
-
     def calls(self, op: str, path: str, needle: str, offset: int = 0) -> list[tuple[str, int]]:
         line, col = position(path, needle)
         rc, out, _ = run("query", op, path, str(line), str(col + offset), "--json")
@@ -74,7 +68,6 @@ class TestCallHierarchy(unittest.TestCase):
         at_definition = self.calls("calls-in", SALE, "def action_confirm", len("def "))
         at_super_call = self.calls("calls-in", SALE_STOCK, "super().action_confirm", len("super()."))
         self.assertEqual(at_definition, at_super_call)
-        # the super() callers (sale_stock's own override among them) are kept
         self.assertTrue(any(uri.endswith("/sale_stock/models/sale_order.py") for uri, _ in at_super_call))
         self.assertGreaterEqual(len(at_super_call), 3)
 
@@ -111,15 +104,12 @@ class TestSymbolsLimit(unittest.TestCase):
 
 
 class TestCheckEnvs(unittest.TestCase):
-    """``check <folder>`` checks each file against its own env."""
-
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory(prefix="odoo-lens-cli-")
         cls._saved = {k: os.environ.get(k) for k in ("ODOO_LENS_CACHE_DIR", *DISCOVERY_VARS)}
         for k in DISCOVERY_VARS:
             os.environ.pop(k, None)
-        # private cache: keep temp trees out of the shared (pruned) cache
         os.environ["ODOO_LENS_CACHE_DIR"] = os.path.join(cls._tmp.name, "cache")
         cls.root = os.path.join(cls._tmp.name, "tickets")
         for side in ("A", "B"):
@@ -149,14 +139,12 @@ class TestCheckEnvs(unittest.TestCase):
             module = os.path.join(self.root, side, "mini", "custom", "my_module")
             self.assertTrue(any(line.startswith(module + os.sep) and "[unknown-module]" in line for line in lines), side)
         self.assertIn(f"skipped (no Odoo env): {self.stray}", err)
-        # only the files actually checked are counted
         _, _, _, n_a = self.check(os.path.join(self.root, "A"))
         _, _, _, n_b = self.check(os.path.join(self.root, "B"))
         self.assertGreater(n_a, 0)
         self.assertEqual(n_a + n_b, n_files)
 
     def test_one_registry_at_a_time(self):
-        """The registry of a checked env is released before the next env is built."""
         refs: list[weakref.ref] = []
         alive: list[list[bool]] = []
         index_env = cli.index_env

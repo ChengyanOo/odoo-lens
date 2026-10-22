@@ -1,10 +1,3 @@
-"""Tests for the features fixes: JS symbols in hover / references, call
-hierarchy callers from cron / server action code and ``compute_sql=``, one
-unknown-receiver policy for references and calls, guessed receivers in the
-call hierarchy, never-loaded Python files ranked last in references, and the
-view type precedence of hover. Runs on a copy of the mini fixture with an extra
-module (temporary directory with its own cache)."""
-
 from __future__ import annotations
 
 import importlib
@@ -28,7 +21,7 @@ from odoo_lens.features.hover import hover, hover_for_target  # noqa: E402
 from odoo_lens.features.navigation import MAX_UNKNOWN_RECEIVER_MODELS, trust_unknown_receiver  # noqa: E402
 from odoo_lens.registry import RefHit  # noqa: E402
 
-# the package attributes ``references`` / ``hover`` are the entry point functions
+# features.references / .hover are the entry functions, not the submodules
 R = importlib.import_module("odoo_lens.features.references")
 
 MINI = os.path.join(ROOT, "tests", "fixtures", "mini")
@@ -199,7 +192,6 @@ EXTRA = {
 
 
 def at(root: str, rel: str, needle: str, nth: int = 0) -> tuple[int, int]:
-    """1-based (line, col) of the nth occurrence of ``needle`` in ``root/rel``."""
     with open(os.path.join(root, rel), encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     seen = 0
@@ -264,24 +256,24 @@ class JsSymbolTest(_Case):
     def test_references_follow_js_imports(self):
         res = self.spots(R.references(self.ctx(WIDGET, 'key("w")'), True))
         expected = {
-            self.spot(UTILS, "makeKey(prefix"),  # declaration
+            self.spot(UTILS, "makeKey(prefix"),
             self.spot(UTILS, "makeKey.next++"),
             self.spot(UTILS, "makeKey.next = 0"),
             self.spot(UTILS, 'makeKey("h")'),
-            self.spot(WIDGET, "key }"),  # local alias in the import clause
+            self.spot(WIDGET, "key }"),
             self.spot(WIDGET, 'key("w")'),
-            self.spot(WIDGET, 'makeKey("x")'),  # namespace import: utils.makeKey
-            self.spot(INDEX, "makeKey"),  # re-export
-            self.spot(OTHER, "makeKey }"),  # imported through the re-export
+            self.spot(WIDGET, 'makeKey("x")'),
+            self.spot(INDEX, "makeKey"),
+            self.spot(OTHER, "makeKey }"),
             self.spot(OTHER, 'makeKey("o")'),
             self.spot(USER, "makeKey }"),
             self.spot(USER, 'makeKey("v")'),
-            self.spot(RENAMED, "mk }"),  # renamed re-export: its local alias
-            self.spot(USER, "mk }"),  # imported through the renamed re-export
+            self.spot(RENAMED, "mk }"),
+            self.spot(USER, "mk }"),
             self.spot(USER, 'mk("u")'),
         }
-        self.assertEqual(set(res), expected)  # comments and strings are not uses
-        self.assertEqual(res[0][0], WIDGET)  # current file first
+        self.assertEqual(set(res), expected)
+        self.assertEqual(res[0][0], WIDGET)
 
     def test_references_default_export(self):
         res = set(self.spots(R.references(self.ctx(WIDGET, "new Helper", offset=5), True)))
@@ -296,15 +288,15 @@ class JsSymbolTest(_Case):
 
     def test_references_through_star_reexport(self):
         res = set(self.spots(R.references(self.ctx(FMT, "formatAll"), True)))
-        self.assertIn(self.spot(USER, "formatAll }"), res)  # imported from a barrel that never names it
+        self.assertIn(self.spot(USER, "formatAll }"), res)
         self.assertIn(self.spot(USER, "formatAll(["), res)
 
     def test_references_through_renamed_reexport(self):
         res = set(self.spots(R.references(self.ctx(USER, 'mk("u")'), True)))
-        self.assertIn(self.spot(USER, 'mk("u")'), res)  # the file at the cursor
+        self.assertIn(self.spot(USER, 'mk("u")'), res)
         self.assertIn(self.spot(RENAMED, "mk }"), res)
         self.assertIn(self.spot(UTILS, "makeKey(prefix"), res)
-        self.assertIn(self.spot(OTHER, 'makeKey("o")'), res)  # importers of the defining module, by its own name
+        self.assertIn(self.spot(OTHER, 'makeKey("o")'), res)
         self.assertIn(self.spot(USER, 'makeKey("v")'), res)
 
     def test_hover_skips_plain_comment(self):
@@ -343,7 +335,6 @@ class CallHierarchyFixTest(_Case):
         line, col = at(self.root, CRON, "action_confirm()")
         self.assertEqual(cron["fromRanges"][0]["start"], {"line": line - 1, "character": col - 1})
         self.assertEqual(callers["cron_ext.action_confirm_server"]["from"]["detail"], "server action code")
-        # never-loaded upgrade scripts are scanned too (ranked last)
         self.assertIn("migrate", callers)
 
     def test_compute_sql_role(self):
@@ -375,10 +366,10 @@ class UnknownReceiverPolicyTest(_Case):
     def test_one_rule_for_references_and_calls(self):
         reg = self.reg
         self.assertEqual(MAX_UNKNOWN_RECEIVER_MODELS, 1)
-        self.assertTrue(trust_unknown_receiver(reg, "action_confirm"))  # sale.order only
-        self.assertFalse(trust_unknown_receiver(reg, "action_twice"))  # two unrelated models
+        self.assertTrue(trust_unknown_receiver(reg, "action_confirm"))
+        self.assertFalse(trust_unknown_receiver(reg, "action_twice"))
         self.assertIn("", reg.models_with_member("write"))
-        self.assertFalse(trust_unknown_receiver(reg, "write"))  # framework member
+        self.assertFalse(trust_unknown_receiver(reg, "write"))
         for name in ("action_confirm", "action_twice", "write"):
             self.assertEqual(calls._receiver_filter(reg, "sale.order", name)(None), trust_unknown_receiver(reg, name), name)
 
@@ -387,14 +378,14 @@ class UnknownReceiverPolicyTest(_Case):
         partner, company = at(self.root, rel, "action_twice"), at(self.root, rel, "action_twice", 1)
 
         def finder(registry, path, source, name):
-            if path == os.path.join(self.root, rel):  # one typed use, one use on an unknown receiver
+            if path == os.path.join(self.root, rel):
                 return [(partner[0] - 1, partner[1] - 1, partner[1] + 11, ["res.partner"], "call"), (company[0] - 1, company[1] - 1, company[1] + 11, None, "call")]
             return []
 
         with mock.patch.object(R, "_usage_finder", lambda: finder):
             res = self.spots(R.references_for_target(self.ctx(rel), Target(METHOD, model="res.partner", name="action_twice"), False))
         self.assertIn((rel, *partner), res)
-        self.assertNotIn((rel, *company), res)  # defined on two models: the unknown receiver is a guess
+        self.assertNotIn((rel, *company), res)
 
 
 class NeverLoadedFilesTest(_Case):
@@ -407,7 +398,7 @@ class NeverLoadedFilesTest(_Case):
 class HoverViewTypeTest(_Case):
     def test_explicit_view_type_wins(self):
         rec = self.reg.records("cron_ext.qweb_form")[0]
-        self.assertEqual((rec.info.get("view_type"), rec.info.get("type")), ("qweb", "form"))  # <field name="type"> vs arch root tag
+        self.assertEqual((rec.info.get("view_type"), rec.info.get("type")), ("qweb", "form"))
         md = hover_for_target(self.ctx(MY), Target(XMLID, xmlid="cron_ext.qweb_form"))
         self.assertEqual(md.split("\n")[-1], "qweb · primary · priority 16")
 

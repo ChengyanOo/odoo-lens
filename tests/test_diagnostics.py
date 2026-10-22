@@ -1,6 +1,3 @@
-"""Tests for features/diagnostics.py: the mini fixture, synthetic per-version
-envs built in temporary directories, and precision checks on real checkouts."""
-
 from __future__ import annotations
 
 import gc
@@ -30,7 +27,6 @@ CHECKED = (".py", ".xml", ".csv")
 
 
 def position(path: str, needle: str, nth: int = 0) -> tuple[int, int]:
-    """0-based (line, col) of the nth occurrence of ``needle`` in ``path``."""
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     seen = 0
@@ -45,8 +41,6 @@ def position(path: str, needle: str, nth: int = 0) -> tuple[int, int]:
 
 
 class DiagnosticsCase(unittest.TestCase):
-    """Helpers over a loaded env (``cls.server``, ``cls.env``, ``cls.root``)."""
-
     server = None
     env = None
     root = ""
@@ -63,7 +57,6 @@ class DiagnosticsCase(unittest.TestCase):
         return diagnostics(RequestContext(self.server, self.env, self.env.registry, path))
 
     def find(self, rel: str, code: str, needle: str, nth: int = 0) -> dict:
-        """The diagnostic of ``code`` starting at ``needle`` in ``rel``."""
         line, col = position(os.path.join(self.root, rel), needle, nth)
         found = self.diags(rel)
         for d in found:
@@ -85,10 +78,6 @@ class DiagnosticsCase(unittest.TestCase):
             dirs[:] = [x for x in dirs if x not in ("static", "__pycache__")]
             out += [os.path.join(d, f) for f in files if f.endswith(CHECKED)]
         return sorted(out)
-
-
-# ---------------------------------------------------------------------------
-# mini fixture
 
 
 class TestFixture(DiagnosticsCase):
@@ -120,18 +109,17 @@ class TestFixture(DiagnosticsCase):
         self.assertEqual(4, len(self.diags(rel)))
 
     def test_uncertain_when_a_dependency_is_missing(self):
-        # my_module depends on 'unknown_module': whatever it could provide is unverified
         d = self.find(f"{self.MY}/models/sale_order.py", "unknown-model", "res.partnr")
         self.assertEqual(2, d["severity"])
         self.assertIn("'unknown_module' is not in the addons path", d["message"])
         d = self.find(f"{self.MY}/models/sale_order.py", "unknown-xmlid", "base.no_such_record")
-        self.assertNotIn("unverified", d["message"])  # base is complete: the id is really missing
+        self.assertNotIn("unverified", d["message"])
 
     def test_custom_view(self):
         rel = f"{self.MY}/views/sale_order_views.xml"
         d = self.find(rel, "unknown-field", "no_such_field")
         self.assertIn("'sale.order'", d["message"])
-        self.assertEqual(["unknown-field"], self.codes(rel))  # x_note is a real field of the module
+        self.assertEqual(["unknown-field"], self.codes(rel))
 
     def test_custom_manifest(self):
         rel = f"{self.MY}/__manifest__.py"
@@ -158,7 +146,7 @@ class TestFixture(DiagnosticsCase):
         self.assertEqual(sorted(keys), keys)
 
     def test_package_entry_point_stays_callable(self):
-        # importing the submodule rebinds odoo_lens.features.diagnostics to it
+        # a submodule import must not rebind features.diagnostics to the module
         path = os.path.join(MINI, self.MY, "models", "sale_order.py")
         for _ in range(2):
             ctx = RequestContext(self.server, self.env, self.env.registry, path)
@@ -167,11 +155,6 @@ class TestFixture(DiagnosticsCase):
     def test_framework_and_js_files(self):
         self.assert_none("odoo/odoo/models.py")
         self.assert_none("odoo/odoo/fields.py")
-
-
-# ---------------------------------------------------------------------------
-# synthetic envs: the mini fixture copied to a temp dir, with a patched version,
-# more base models and a "diag_lab" module exercising every check
 
 
 def _base_extra(version: tuple[int, int]) -> str:
@@ -491,7 +474,6 @@ LAB = {
         </odoo>
         """,
     "custom/diag_lab/views/broken.xml": "<odoo>\n    <record id='x'>\n</odoo>\n",
-    # a group of a module diag_lab does not depend on
     "enterprise/sale_subscription/security/groups.xml": """
         <?xml version="1.0" encoding="utf-8"?>
         <odoo>
@@ -510,7 +492,6 @@ LAB = {
         }
         """,
     "custom/diag_lab/tests/broken_fixture.xml": "<odoo><unclosed></odoo>\n",
-    # auto-installed with dependencies already in diag_lab's closure: available at runtime
     "custom/diag_bridge/__init__.py": "from . import models\n",
     "custom/diag_bridge/__manifest__.py": "{'name': 'Bridge', 'depends': ['sale', 'mail'], 'auto_install': True, 'license': 'LGPL-3'}\n",
     "custom/diag_bridge/models.py": """
@@ -535,8 +516,6 @@ LAB = {
 
 
 class SyntheticCase(DiagnosticsCase):
-    """Builds a copy of the mini fixture for ``version`` with the lab modules."""
-
     version: tuple[int, int] = (18, 0)
     _tmp: tempfile.TemporaryDirectory
     _cache_env: str | None = None
@@ -544,7 +523,6 @@ class SyntheticCase(DiagnosticsCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory(prefix="odoo-lens-diag-")
-        # private cache: keep temp trees out of the shared (pruned) cache
         cls._cache_env = os.environ.get("ODOO_LENS_CACHE_DIR")
         os.environ["ODOO_LENS_CACHE_DIR"] = os.path.join(cls._tmp.name, "cache")
         cls.root = os.path.join(cls._tmp.name, "mini")
@@ -588,11 +566,7 @@ class SyntheticCase(DiagnosticsCase):
 
 
 class TestSynthetic18(SyntheticCase):
-    """Version independent checks (on an 18.0 tree) + 18.0 deprecations."""
-
     version = (18, 0)
-
-    # -- python -----------------------------------------------------------------
 
     def test_python_field_strings(self):
         rel = self.LAB_PY
@@ -603,10 +577,9 @@ class TestSynthetic18(SyntheticCase):
         d = self.find(rel, "unknown-field", "nope_path")
         self.assertIn("'name' (Char field of model 'diag.lab', not relational)", d["message"])
         self.assertEqual(2, self.find(rel, "unknown-field", "nope_domain")["severity"])
-        # partner_id.name: first in related=, then in @api.constrains
         self.assertIn("dotted paths", self.find(rel, "unknown-field", "partner_id.name", 1)["message"])
         self.assertEqual([], self.codes_at(rel, "replaced_depends"))  # an outer @api.depends replaces it
-        self.assertEqual([], self.codes_at(rel, "line_ids.amount"))  # abstract mixin: resolved on diag.lab
+        self.assertEqual([], self.codes_at(rel, "line_ids.amount"))
 
     def test_python_methods(self):
         rel = self.LAB_PY
@@ -622,7 +595,7 @@ class TestSynthetic18(SyntheticCase):
         d = self.find(rel, "missing-dependency", "sale.subscription.plan")
         self.assertIn("loading 'diag_lab' fails without it", d["message"])
         self.find(rel, "missing-dependency", "diag.other.model")
-        self.assertEqual([], self.codes_at(rel, "diag.bridge.model"))  # auto_install bridge, loaded before
+        self.assertEqual([], self.codes_at(rel, "diag.bridge.model"))
         self.assertEqual([], self.codes_at(rel, "diag.bridge.model'].search"))
 
     def test_python_xmlids(self):
@@ -630,9 +603,8 @@ class TestSynthetic18(SyntheticCase):
         self.find(rel, "unknown-xmlid", "base.no_such_xmlid")
         for soft in ("base.soft_xmlid", "base.template_only", "base.commented_out", "base.prefix_", "base.main_company"):
             self.assertEqual([], self.codes_at(rel, soft), soft)
-        # has_group() tolerates groups of modules that are not installed...
+        # has_group() tolerates groups of modules that are not installed
         self.assertEqual([], self.codes_at(rel, "sale_subscription.group_subscription_user"))
-        # ... but a group that exists nowhere is a bug
         self.find(rel, "unknown-xmlid", "sale_subscription.group_whatever")
 
     def test_python_syntax_error(self):
@@ -651,8 +623,6 @@ class TestSynthetic18(SyntheticCase):
         for absent in ("auto_join", "_sql_constraints", "api.returns", "_inherit = ['res.partner']", "'partner_id'}"):
             self.assertEqual([], self.codes_at(rel, absent), absent)
 
-    # -- xml ---------------------------------------------------------------------
-
     def test_primary_view(self):
         rel = self.VIEWS
         self.assertIn("'diag.lab'", self.find(rel, "unknown-field", "no_such_lab_field")["message"])
@@ -661,13 +631,11 @@ class TestSynthetic18(SyntheticCase):
         self.assertIn("private", self.find(rel, "private-method", "_private_method")["message"])
         self.assertEqual([], self.codes_at(rel, '"cancel" special'))
         self.assertEqual([], self.codes_at(rel, '"action_lab"'))
-        # <groupby name="lab_id"> switches to diag.lab for its children
         self.assertEqual([], self.codes_at(rel, 'name="partner_id"/>'))
 
     def test_inheriting_view(self):
         rel = self.VIEWS
         self.find(rel, "unknown-field", "no_such_sale_field")
-        # located in the order_line sub-view of the parent: fields of sale.order.line
         self.assertEqual([], self.codes_at(rel, '"price_unit"'))
         self.assertEqual([], self.codes_at(rel, '"product_uom_qty"'))
         # <field> children of position="attributes" are ignored by Odoo
@@ -694,9 +662,7 @@ class TestSynthetic18(SyntheticCase):
 
     def test_xml_syntax_errors(self):
         self.assertEqual(["syntax-error"], self.codes("custom/diag_lab/views/broken.xml"))
-        self.assertEqual([], self.codes("custom/diag_lab/tests/broken_fixture.xml"))  # not loaded by Odoo
-
-    # -- csv / manifest ------------------------------------------------------------
+        self.assertEqual([], self.codes("custom/diag_lab/tests/broken_fixture.xml"))
 
     def test_access_csv(self):
         rel = self.ACCESS
@@ -707,7 +673,7 @@ class TestSynthetic18(SyntheticCase):
         d = self.find(rel, "unknown-xmlid", "model_sale_orders")
         self.assertIn("did you mean 'sale.model_sale_order'", d["message"])
         self.assertEqual([], self.codes_at(rel, "model_diag_lab"))
-        self.assertEqual([], self.codes("custom/diag_lab/data/template/account.tax-xx.csv"))  # not in the manifest
+        self.assertEqual([], self.codes("custom/diag_lab/data/template/account.tax-xx.csv"))
 
     def test_manifest(self):
         d = self.find(self.MANIFEST, "missing-file", "views/lab_viewz.xml")
@@ -719,7 +685,6 @@ class TestSynthetic18(SyntheticCase):
             self.assert_none(os.path.relpath(path, self.root))
 
     def test_registry_changes_are_seen(self):
-        """Diagnostics follow registry updates (caches are per registry generation)."""
         reg = self.env.registry
         path = os.path.join(self.root, self.LAB_PY)
         with open(path, encoding="utf-8") as fh:
@@ -775,7 +740,7 @@ class TestSynthetic19(SyntheticCase):
         self.assertIn("models.Constraint", self.find(rel, "deprecated", "_sql_constraints")["message"])
         self.assertIn("bypass_search_access", self.find(rel, "deprecated", "auto_join")["message"])
         self.assertEqual(1, self.find(rel, "deprecated", "@api.returns")["severity"])
-        self.assertEqual(3, self.find(rel, "deprecated", "group_operator")["severity"])  # alias until 19.0
+        self.assertEqual(3, self.find(rel, "deprecated", "group_operator")["severity"])  # still an alias before saas-19.1
         d = self.find(rel, "deprecated", "_inherit = ['res.partner']")
         self.assertIn("new model 'lab.partner'", d["message"])
         d = self.find(rel, "unknown-field", "partner_id'}")
@@ -793,18 +758,12 @@ class TestSynthetic194(SyntheticCase):
         found = self.diags(self.ACCESS)
         self.assertEqual(["unknown-model"], [d["code"] for d in found])
         self.assertIn("use 'ir.access'", found[0]["message"])
-        self.assertEqual(2, self.find(self.VERSIONED, "deprecated", "group_operator")["severity"])  # alias removed
-
-
-# ---------------------------------------------------------------------------
-# real checkouts
+        self.assertEqual(2, self.find(self.VERSIONED, "deprecated", "group_operator")["severity"])  # alias removed in saas-19.1
 
 
 class RealTreeCase(DiagnosticsCase):
     version = ""
-    # modules whose files must produce no diagnostic but the known genuine defects
     clean_modules: tuple[str, ...] = ("base", "web", "mail", "account", "sale", "purchase", "stock", "mrp", "hr", "crm", "project", "website", "point_of_sale")
-    # (file, message excerpt) of real defects of Odoo's own code in those modules
     known_defects: tuple[tuple[str, str], ...] = ()
 
     @classmethod
@@ -843,7 +802,7 @@ class RealTreeCase(DiagnosticsCase):
             path = os.path.join(self.root, rel)
             ctx = RequestContext(self.server, self.env, reg, path)
             ctx.facts  # extraction is cached by the server for open documents
-            reg._bump()  # every edit invalidates the registry caches
+            reg._bump()
             t = time.perf_counter()
             diagnostics(ctx)
             self.assertLess(time.perf_counter() - t, 0.5, rel)
@@ -857,13 +816,11 @@ class TestReal16(RealTreeCase):
     def test_known_defects(self):
         d = self.find("enterprise/helpdesk/controllers/rating.py", "unknown-xmlid", "helpdesk.group_heldpesk_manager")
         self.assertIn("did you mean 'helpdesk.group_helpdesk_manager'", d["message"])
-        # invalid XML shipped in the assets
         self.assertEqual(["syntax-error"], self.codes("enterprise/knowledge/static/src/components/html_field/html_field.xml"))
 
     def test_chained_name_models(self):
-        """``_name = _description = 'x'`` models (missed by the extractor) are not 'unknown'."""
         self.assert_none("odoo/addons/base_import/security/ir.model.access.csv")
-        self.assert_none("odoo/odoo/addons/test_impex/models.py")  # models named in a loop
+        self.assert_none("odoo/odoo/addons/test_impex/models.py")
 
 
 @unittest.skipUnless(os.path.isdir(os.path.join(WORKTREES, "18.0")), "no 18.0 checkout")
@@ -881,7 +838,6 @@ class TestReal18(RealTreeCase):
         self.assertIn("inverse= of field 'phone_number'", d["message"])
 
     def test_bridges_and_guards(self):
-        # depends of compute overrides whose field lives in a non-dependency
         self.assert_none("enterprise/l10n_be_hr_payroll/models/hr_contract.py")
         # wizard depends through regular models are not resolved by Odoo
         self.assert_none("odoo/addons/account/wizard/account_payment_register.py")
@@ -907,17 +863,13 @@ class TestReal20(RealTreeCase):
         self.assertIn("did you mean 'stock.group_tracking_lot'", d["message"])
         d = self.find("enterprise/l10n_iq_hr_payroll/data/l10n_iq_hr_payroll_demo.xml", "unknown-method", "_set_input_value")
         self.assertIn("'hr.version'", d["message"])
-        # a stale demo file the manifest keeps in 'other_files' (its 'demo' entry is commented out):
-        # Odoo never loads it, so its dangling refs are not reported
+        # stale demo file (manifest 'demo' entry commented out): never loaded by Odoo
         self.assertEqual(self.diags("enterprise/l10n_be_hr_contract_salary/data/hr_contract_salary_benefit_demo.xml"), [])
 
     def test_precision_patterns(self):
-        # create_uid on a model whose mixin has _auto = False; extension sorted
-        # before its model's definition file; fields attached with setattr()
         self.assert_none("enterprise/documents_spreadsheet/views/spreadsheet_template_views.xml")
         self.assert_none("enterprise/account_asset/models/account_asset_ledger_variant.py")
         self.assert_none("odoo/odoo/addons/base/views/ir_rule_views.xml")
-        # ids created by Python code; chained _name models
         self.assert_none("enterprise/marketing_automation_crm/models/marketing_campaign.py")
         self.assert_none("enterprise/hr_appraisal/models/hr_appraisal.py")
 

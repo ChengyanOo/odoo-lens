@@ -1,21 +1,3 @@
-"""Command line interface.
-
-    odoo-lens                         run the language server on stdio (default)
-    odoo-lens env PATH                show the Odoo environment detected for PATH
-    odoo-lens index PATH [--no-cache] [--workers N]
-                                      build the index of PATH's env and print timings
-    odoo-lens query OP FILE LINE COL  run a feature at a 1-based position, e.g.
-                                      odoo-lens query definition sale_order.py 120 18
-                                      OP: definition|references|hover|implementation|typedef|symbols|calls-in|calls-out|targets
-                                      (targets: the raw cursor analysis, for debugging)
-    odoo-lens symbols QUERY [--path P] [--limit N]
-                                      workspace symbol search in P's env (default: cwd)
-    odoo-lens check PATH...           print diagnostics for files / directories, each checked
-                                      against its own Odoo env (exit 1 if errors)
-    odoo-lens session-hint [DIR]      SessionStart hook: a short note for Claude when DIR (default:
-                                      $CLAUDE_PROJECT_DIR or cwd) holds Odoo code, else nothing
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -29,8 +11,6 @@ from . import __version__
 
 
 class NullEndpoint:
-    """Endpoint stand-in for headless use (CLI, tests)."""
-
     _stopped = False
 
     def notify(self, method: str, params: Any = None) -> None:
@@ -60,7 +40,6 @@ class NullEndpoint:
 
 
 def headless_server():
-    """An OdooLanguageServer without transport, initialized, for synchronous use."""
     from .server import OdooLanguageServer
 
     server = OdooLanguageServer(NullEndpoint())  # type: ignore[arg-type]
@@ -69,7 +48,6 @@ def headless_server():
 
 
 def load_env(server: Any, path: str, workers: int | None = None, use_cache: bool = True):
-    """Discover and synchronously index the env of ``path``. Returns (env, stats)."""
     if not use_cache:
         os.environ["ODOO_LENS_NO_CACHE"] = "1"
     path = os.path.abspath(path)
@@ -83,7 +61,6 @@ def load_env(server: Any, path: str, workers: int | None = None, use_cache: bool
 
 
 def index_env(env: Any, workers: int | None = None):
-    """Synchronously build and publish the registry of ``env``. Returns the stats."""
     from .indexer import build_index
 
     registry, stats = build_index(env, workers=workers, wait_for_cache_write=True)
@@ -100,7 +77,7 @@ def _ctx(server: Any, env: Any, path: str, line1: int, col1: int):
     text = server.documents.text(path) or ""
     lines = text.split("\n")
     line0 = max(0, line1 - 1)
-    # CLI columns are 1-based characters (code points) like Claude's; convert to UTF-16
+    # CLI columns are 1-based code points (like Claude's) -> 0-based UTF-16
     line_text = lines[line0] if line0 < len(lines) else ""
     col16 = utf16_len(line_text[: max(0, col1 - 1)])
     return RequestContext(server, env, env.registry, path, line0, col16)
@@ -216,8 +193,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         calls = features.incoming_calls if op == "calls-in" else features.outgoing_calls
         res = []
         for item in features.prepare_call_hierarchy(ctx) or []:
-            # like the server (_item_context): the context sits on the item, not on the
-            # cursor; selectionRange is already 0-based UTF-16
+            # context on the item, not the cursor (as server._item_context); selectionRange is 0-based UTF-16
             sel = (item.get("selectionRange") or item.get("range") or {}).get("start") or {}
             ictx = RequestContext(server, env, env.registry, uri_to_path(item["uri"]), sel.get("line", 0), sel.get("character", 0))
             res += calls(ictx, item) or []
@@ -246,11 +222,10 @@ def cmd_symbols(args: argparse.Namespace) -> int:
     t = time.perf_counter()
     res = features.workspace_symbols(server, env, env.registry, args.query, NEVER_CANCELLED)
     dt = time.perf_counter() - t
-    # the server already caps the answer and ends a cut one with a "not listed" marker
+    # no default limit: the server already caps the answer and ends a cut one with a "not listed" marker
     shown = res if args.limit is None else res[: max(0, args.limit)]
     _print(shown, args.json)
     if len(shown) < len(res):
-        # stderr in --json mode, to keep stdout valid JSON
         print(f"({len(res) - len(shown)} more results not shown; raise --limit)", file=sys.stderr if args.json else sys.stdout)
     print(f"({len(res)} results, {dt * 1000:.1f} ms)", file=sys.stderr)
     return 0
@@ -274,8 +249,6 @@ def cmd_check(args: argparse.Namespace) -> int:
             targets.append(p)
     if not targets:
         return 0
-    # each file is checked against its own env: a folder may hold modules of several
-    # addons roots or Odoo versions
     groups: dict[str, tuple[Any, list[str]]] = {}
     unresolved: list[str] = []
     for path in sorted(set(targets)):
@@ -315,13 +288,12 @@ def cmd_check(args: argparse.Namespace) -> int:
                     code = f" [{d['code']}]" if d.get("code") else ""
                     print(f"{path}:{s['line'] + 1}:{s['character'] + 1}: {sev_names.get(sev, sev)}{code}: {d['message']}")
         if len(groups) > 1:
-            # one registry in memory at a time, released like server._evict_envs does: the
-            # analysis caches still reference it and build_index gc.freeze()s it
+            # one registry at a time, released as in server._evict_envs; next build's gc.collect() frees it
             ctx = None
             env.registry = None
             env.ready.clear()
             _purge_caches()
-            gc.unfreeze()  # the next build_index's gc.collect() reclaims it
+            gc.unfreeze()
     print(f"{n_total} diagnostics ({n_err} errors) in {n_files} files", file=sys.stderr)
     return 1 if n_err else 0
 
@@ -330,9 +302,6 @@ MAX_HINT_MODULES = 300
 
 
 def cmd_session_hint(args: argparse.Namespace) -> int:
-    """Tell Claude, at session start, that odoo-lens covers this project - only
-    when it holds Odoo code (a checkout, a container of checkouts, or modules
-    within 3 levels). Prints nothing otherwise; never fails."""
     try:
         from .envs import find_community_root, guess_version, is_community_root, iter_module_dirs, read_release_version
 
@@ -369,7 +338,7 @@ def cmd_session_hint(args: argparse.Namespace) -> int:
             "(unknown fields / models / methods / xml ids, missing dependencies, files never imported, syntax "
             f"removed in this Odoo version), run first: {launcher} check <module_dir>"
         )
-    except Exception:  # a hint must never break a session start
+    except Exception:  # SessionStart hook: must never fail
         pass
     return 0
 

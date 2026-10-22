@@ -1,6 +1,3 @@
-"""Extractor / registry fixes: compute_sql method refs, UTF-16 magic-field
-positions, the ``__last_update`` version gate and log-access fields on mixins."""
-
 from __future__ import annotations
 
 import os
@@ -177,14 +174,14 @@ class MagicFieldsTest(unittest.TestCase):
 
     def test_last_update_gate(self):
         self.assertIn("__last_update", self.registry(16).fields("x.thing"))
-        self.assertIn("__last_update", self.registry(None).fields("x.thing"))  # unknown version: kept, like diagnostics
+        self.assertIn("__last_update", self.registry(None).fields("x.thing"))
         self.assertNotIn("__last_update", self.registry(17).fields("x.thing"))
         self.assertNotIn("__last_update", self.registry(18).fields("x.thing"))
 
     def test_log_access_fields(self):
         reg = self.registry(18)
         self.assertIn("create_uid", reg.fields("x.thing"))
-        self.assertIn("create_uid", reg.fields("x.mixin"))  # kept on mixins for navigation in mixin code
+        self.assertIn("create_uid", reg.fields("x.mixin"))
         self.assertNotIn("create_uid", reg.fields("x.nolog"))
         self.assertIn("id", reg.fields("x.nolog"))
 

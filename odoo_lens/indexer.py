@@ -1,17 +1,3 @@
-"""Builds and refreshes the facts index of an :class:`~odoo_lens.envs.Env`.
-
-Pipeline (cold start on a full community+enterprise checkout ~ a few seconds,
-warm start from the cache well under a second):
-
-1. :func:`scan` walks every addons root (and the ``odoo`` framework package)
-   with a pruned ``os.scandir`` walk and stats each interesting file;
-2. cached facts whose ``(mtime_ns, size)`` still match are reused;
-3. the remaining files are extracted - in a spawn-based process pool when there
-   are many (each batch comes back as one marshal blob), in-process otherwise;
-4. dirty cache shards are written back in a background thread;
-5. a :class:`~odoo_lens.registry.Registry` is built from all facts.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -30,14 +16,12 @@ from .extract import extract_source, kind_for_path
 
 log = logging.getLogger("odoo_lens.indexer")
 
-# directory names never worth descending into
 PRUNE = frozenset({"__pycache__", "node_modules", ".git", ".hg", ".svn", "i18n", "i18n_extra", ".tox", ".venv", "venv"})
-# sub-paths of a module that are skipped (vendored libs, binaries)
 PRUNE_REL = frozenset(
     {"static/lib", "static/description", "static/img", "static/fonts", "static/src/img", "static/src/fonts", "static/src/libs"}
 )
 
-PARALLEL_THRESHOLD = 300  # below this many files to extract, stay in-process
+PARALLEL_THRESHOLD = 300
 
 
 class FileEntry:
@@ -54,12 +38,10 @@ class FileEntry:
 
 
 class Scan:
-    """Result of walking an env: files by root plus module name -> directory."""
-
     def __init__(self) -> None:
         self.files: dict[str, list[FileEntry]] = {}
-        self.modules: dict[str, str] = {}  # module name -> module dir (first addons root wins)
-        self.shadowed: list[str] = []  # module dirs hidden by an earlier root
+        self.modules: dict[str, str] = {}
+        self.shadowed: list[str] = []
 
     def all_files(self) -> Iterable[FileEntry]:
         for entries in self.files.values():
@@ -153,14 +135,8 @@ def scan(env: Env) -> Scan:
     return result
 
 
-# ---------------------------------------------------------------------------
-# extraction
-
-
+# pool workers: stdout -> stderr (protocol pipe), no cyclic GC (ASTs are acyclic), exit with the server
 def _worker_init(parent: int | None = None) -> None:
-    """Pool worker setup: never touch the server's stdout (it carries the LSP
-    protocol), skip the cyclic GC (ASTs are acyclic: refcounting frees them) and
-    exit as soon as the server process is gone."""
     try:
         os.dup2(2, 1)
     except OSError:
@@ -177,11 +153,10 @@ def _worker_init(parent: int | None = None) -> None:
         threading.Thread(target=watch, name="odoo-lens-worker-watch", daemon=True).start()
 
 
-_POOLS: set = set()  # live extraction pools, killed by terminate_workers() before the server exits
+_POOLS: set = set()
 
 
 def terminate_workers() -> None:
-    """Kill the processes of any running extraction pool (server exit paths)."""
     for pool in list(_POOLS):
         for proc in list(getattr(pool, "_processes", {}).values()):
             try:
@@ -190,8 +165,8 @@ def terminate_workers() -> None:
                 pass
 
 
+# one marshal blob per batch (facts are builtin types): cheap transfer back from pool workers
 def _extract_batch(batch: list[tuple[str, str]]) -> bytes:
-    """Extract a batch of (path, kind) -> marshal blob (in pool workers, or in-process)."""
     out = []
     for path, kind in batch:
         try:
@@ -205,7 +180,6 @@ def _extract_batch(batch: list[tuple[str, str]]) -> bytes:
 
 
 def _batches(items: list[tuple[str, str, int]], n: int) -> list[list[tuple[str, str]]]:
-    """Split (path, kind, size) items into ``n`` size-balanced batches."""
     items = sorted(items, key=lambda t: -t[2])
     batches: list[list[tuple[str, str]]] = [[] for _ in range(n)]
     loads = [0] * n
@@ -228,7 +202,6 @@ def extract_files(
     workers: int | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> list[tuple[str, int, int, dict]]:
-    """Extract facts for ``todo``; returns (path, mtime_ns, size, facts) tuples."""
     if not todo:
         return []
     workers = workers or default_workers()
@@ -256,10 +229,6 @@ def extract_files(
         _POOLS.discard(pool)
         pool.shutdown(wait=True, cancel_futures=True)
     return results
-
-
-# ---------------------------------------------------------------------------
-# index build / refresh
 
 
 class IndexStats:
@@ -298,15 +267,11 @@ def build_index(
     progress: Callable[[str, int, int], None] | None = None,
     wait_for_cache_write: bool = False,
 ):
-    """Scan + extract + build the registry for ``env``. Returns (registry, stats)."""
     from .registry import Registry
 
     stats = IndexStats()
     t0 = time.perf_counter()
-    # Building ~millions of long-lived objects: the cyclic GC would re-traverse the
-    # growing heap again and again (it dominated build time), so it is paused for
-    # the build and the result is frozen (later collections skip it). Garbage is
-    # collected first so that no pending cycle gets frozen with it.
+    # GC off during build (it dominated build time), result gc.freeze()d; collect first: no cycle frozen
     with _BUILD_LOCK:
         gc.collect()
         gc_was_enabled = gc.isenabled()
@@ -346,7 +311,7 @@ def _build_index(env, workers, progress, wait_for_cache_write, stats, t0):
                 file_stats[fe.path] = (fe.mtime, fe.size)
             else:
                 todo.append(fe)
-        if len(new) != len(old):  # files disappeared (new/changed ones are marked after extraction)
+        if len(new) != len(old):
             dirty.add(root)
         shards[root] = new
     stats.t_cache = time.perf_counter() - t1

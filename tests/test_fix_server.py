@@ -1,6 +1,3 @@
-"""Server lifecycle and refresher fixes: one shutdown flag, refresher works on
-snapshots (never on a published registry), dead APIs removed."""
-
 from __future__ import annotations
 
 import io
@@ -58,16 +55,14 @@ class ShutdownTest(unittest.TestCase):
         stdout = io.BytesIO()
         endpoint = Endpoint(Transport(stdin, stdout))
         server = OdooLanguageServer(endpoint)
-        # shutdown/exit are handled by the protocol layer only
         self.assertNotIn("shutdown", endpoint._requests)
         self.assertNotIn("exit", endpoint._notifications)
         self.assertFalse(hasattr(server, "shutdown_requested"))
-        endpoint.serve_forever()  # returns on stdin EOF
+        endpoint.serve_forever()
         self.assertTrue(endpoint.shutdown_received)
         by_id = {m["id"]: m for m in unframe(stdout.getvalue()) if "id" in m}
         self.assertIsNone(by_id[2]["result"])
         self.assertEqual(by_id[3]["error"]["code"], INVALID_REQUEST)
-        # the periodic stat sweep stops rescheduling itself once shutdown arrived
         server._refresh_tick()
         try:
             self.assertEqual(endpoint._timers, {})
@@ -85,13 +80,11 @@ class ShutdownTest(unittest.TestCase):
 
         endpoint = Recording()
         server = OdooLanguageServer(endpoint)  # type: ignore[arg-type]
-        server._refresh_tick()  # NullEndpoint has no shutdown_received: keeps ticking
+        server._refresh_tick()
         self.assertEqual(endpoint.later, ["refresh"])
 
 
 class QueueEndpoint(NullEndpoint):
-    """Posts are queued; the test thread plays the dispatcher."""
-
     def __init__(self):
         self.posted: queue.Queue = queue.Queue()
 
@@ -100,8 +93,6 @@ class QueueEndpoint(NullEndpoint):
 
 
 class Untouchable:
-    """Stands in for a published registry the refresher must not read."""
-
     def __getattr__(self, name):
         raise AssertionError(f"refresher read registry.{name}")
 
@@ -117,8 +108,7 @@ class RefreshSnapshotTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # _apply_refresh saves shards on a background thread: let it finish while
-        # ODOO_LENS_CACHE_DIR still points at the scratch dir
+        # shards are saved on a background thread: join it before restoring ODOO_LENS_CACHE_DIR
         for t in threading.enumerate():
             if t.name == "odoo-lens-cache-writer":
                 t.join(30)
@@ -132,7 +122,6 @@ class RefreshSnapshotTest(unittest.TestCase):
         return os.path.join(self.root, rel)
 
     def drain(self, endpoint: QueueEndpoint, server: OdooLanguageServer) -> list:
-        """Run posted calls on this (dispatcher) thread until the sweep is over."""
         calls = []
         deadline = time.monotonic() + 30
         while server._refreshing:
@@ -157,8 +146,6 @@ class RefreshSnapshotTest(unittest.TestCase):
 
         server._start_refresh([env])
         self.assertTrue(server._refreshing)
-        # mutations of the published registry after the snapshot are invisible
-        # to the background sweep (it never reads the live dicts)
         ghost = self.p("custom/my_module/ghost.py")
         reg.file_stats[ghost] = (1, 1)
         calls = self.drain(endpoint, server)
@@ -168,7 +155,7 @@ class RefreshSnapshotTest(unittest.TestCase):
         _, applied_reg, _, todo, _, removed = applies[0]
         self.assertIs(applied_reg, reg)
         self.assertEqual([fe.path for fe in todo], [changed])
-        self.assertEqual(removed, [gone])  # not the ghost added after the snapshot
+        self.assertEqual(removed, [gone])
         self.assertNotIn(gone, reg.file_stats)
         st = os.stat(changed)
         self.assertEqual(reg.file_stats[changed], (st.st_mtime_ns, st.st_size))
