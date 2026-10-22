@@ -31,8 +31,9 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
 
 * **Facts** (`odoo_lens/facts.py`) are what extractors produce per file: builtin
   types only (marshal-able), tuples accessed via index constants. They are
-  cached per addons root in `~/.cache/odoo-lens/*.marshal` and validated with
-  `(mtime_ns, size)`.
+  cached per addons root in `*.marshal` shards under `$ODOO_LENS_CACHE_DIR`,
+  else `$XDG_CACHE_HOME/odoo-lens` (default `~/.cache/odoo-lens`), and
+  validated with `(mtime_ns, size)`.
 * **Registry** is built from all facts of an env and updated per file
   (`update_file`/`remove_file`) when documents change or the periodic stat sweep
   finds modified files. It is the single source of semantic truth.
@@ -55,9 +56,13 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
   wait on `env.ready` (≤ 45 s, under Claude Code's 60 s request timeout).
   Open-document overlays are applied lazily by `server._registry()`, and only
   when the document text differs from the indexed disk content.
-* Claude Code sends no didClose/didChangeWatchedFiles: open documents are
-  re-checked against disk on every request, and a 30 s background stat sweep
-  re-extracts changed files and applies updates on the dispatcher.
+* Claude Code sends no didChangeWatchedFiles, and didClose only when it evicts
+  documents beyond 50 open files (LRU): open documents are re-checked against
+  disk on every request, and a 30 s background stat sweep re-extracts changed
+  files and applies updates on the dispatcher. The sweep compares the disk
+  against copies of `file_stats` / `module_dirs` taken on the dispatcher
+  (`server._start_refresh`), so the refresher thread never reads a published
+  registry.
 * A Python file with a syntax error is parsed tolerantly
   (`extract/pyfacts.parse_tolerant`): the offending lines are replaced by
   `pass` / `if 1:` or blanked (line numbers untouched) until the rest parses,
@@ -65,7 +70,9 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
   only when they still declare every class / field / method of the last good
   ones; otherwise it keeps the last good facts. The error is still reported.
 * At most 3 envs keep a registry in memory (LRU).
-* All columns are UTF-16 (`positionEncoding: utf-16`); `documents.py` converts.
+* All columns are UTF-16 (`positionEncoding: utf-16`). UTF-8 byte columns are
+  converted by `extract/common.SrcIndex` (extractors, registry) and
+  `documents.bytecol_to_utf16` (a single line).
 
 ## 3. Environments (envs.py)
 
@@ -77,8 +84,8 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
   the workspace folder / config dir / module parent; version = majority vote of
   manifest versions (`17.0.x.y.z`); sources located through
   `ODOO_LENS_SOURCES` templates and defaults (`~/odev/worktrees/{version}/odoo`…).
-* Overrides: `.odoo-lens.json` (`odoo`, `addons`, `version`, `diagnostics`,
-  `python_paths`) and `ODOO_LENS_ODOO / ODOO_LENS_ADDONS / ODOO_LENS_VERSION`.
+* Overrides: `.odoo-lens.json` (`odoo`, `addons`, `version`, `diagnostics`)
+  and `ODOO_LENS_ODOO / ODOO_LENS_ADDONS / ODOO_LENS_VERSION`.
 * `env.custom_roots` = addons roots that are customer code: everything except
   the community addons and Odoo's own repositories found next to it
   (`enterprise`, `design-themes`, `industry`, ...). Diagnostics are published as
@@ -89,9 +96,11 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
 ## 4. Registry semantics (registry.py)
 
 * **Modules**: first occurrence of a module name in addons-root order wins.
-  `depends` from the manifest (+ implicit `base` for everything but `base`).
-  `depth(base)=0`, `depth(m)=1+max(depth(deps))`; **load rank** = sort by
-  `(depth, name)`. Missing dependencies are ignored for depth.
+  `depends` from the manifest (`base` when it declares none, except for `base`
+  itself). `depth(base)=0`, `depth(m)=1+max(depth(deps))`; **load rank** = sort
+  by `(depth, name)`; from 19.0 a `test_*` module loads right after its last
+  loaded dependency (same depth, ordered after it). Missing dependencies are
+  ignored for depth.
 * **Scope** of a file = `closure(module)` (module + transitive deps): what is
   guaranteed loaded when that code runs. Lookups are scoped first; when a scoped
   lookup finds nothing, features may fall back to the unscoped (whole env)
@@ -99,13 +108,15 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
 * **Loaded files**: only Python files reachable through imports from a module's
   `__init__.py` are registered (Odoo never imports the others: forgotten
   imports, scripts); the post-order of that import walk is the class definition
-  order inside a module. Classes under `tests/`, `migrations/`, `upgrades/` and
-  `_register = False` classes are never registered either.
+  order inside a module. Classes under `tests/`, `migrations/`, `upgrades/`,
+  `upgrade/`, `static/` and `_register = False` classes are never registered
+  either.
 * **Model composition** (Odoo `_build_model` / `add_to_registry`):
   * `_name = X`, `X ∉ _inherit` → defines X; other `_inherit` entries are parents.
   * no `_name` with a str `_inherit = X` → extends X; with a list `_inherit`:
-    16–18 take the single parent, 19+ derive `_name` from the class name
-    (`HrEmployee` → `hr.employee`); `_name = X ∈ _inherit` → extends X.
+    16–18 take the single parent (the class name verbatim with several), 19+
+    derive `_name` from the class name (`HrEmployee` → `hr.employee`);
+    `_name = X ∈ _inherit` → extends X.
   * every model except `base` gets `base` as implicit last parent.
   * `_inherits = {P: f}` (and `Many2one(..., delegate=True)`) delegates P's fields
     (not methods) through m2o `f`; 16–18 create `f` automatically.
@@ -122,7 +133,8 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
   arguments from base-most to most-derived; comodels follow `related=` paths.
   Magic fields (`id`, `display_name`, log-access fields, 16's `__last_update`)
   are synthesized where Odoo's metaclass adds them (`_log_access`/`_auto` read
-  from the model's own classes only).
+  from the model's own classes only). Exception: abstract models keep the
+  log-access fields so mixin code navigates; diagnostics apply Odoo's default.
 * Implicit xml ids: `<module>.model_<model with . → _>` for every module that
   defines **or extends** the model, `<module>.field_<model_>__<field>` –
   resolvable by `records()`.
@@ -135,18 +147,29 @@ file path ──► EnvManager (envs.py) ──► Env {version, community root,
 | field `X.f` | definitions in scope (base-most first, overrides after) | definitions + string paths (related/depends/domains/…) + XML `<field name>` + Python attribute accesses inferred on X (or children) | field card (type, comodel, merged args, definition list, source snippet) | all definitions in all modules |
 | method `X.m` | definitions in scope (for `super().m` only the ones below the current class) | definitions + calls/attribute accesses inferred on X + XML buttons + `compute=`… strings | method card (signature, decorators, docstring, override chain) | every override in all modules and child models |
 | xmlid `m.x` | record definition(s) | every ref (`ref=`, `eval ref()`, `%(x)d`, `inherit_id`, `parent`, `action`, `groups`, `t-call`, `env.ref`, csv `:id` columns) | record card | records/views inheriting it (`inherit_id`) |
-| template (owl t-name) | `t-name` element | `t-call` / `t-inherit` / JS `template = "..."` | — | inheriting templates |
-| module | `__manifest__.py` | manifest `depends` entries naming it | module card | modules depending on it |
-| file | the file | — | — | — |
-| pysym | the definition | name-based references in importing files | signature + docstring | subclasses / overrides |
+| template (owl t-name) | `t-name` element | `t-call` / `t-inherit` / JS `template = "..."` | template card | inheriting templates |
+| module | `__manifest__.py` | manifest `depends` entries naming it + absolute `odoo.addons.<m>` imports | module card | modules depending on it |
+| file | the file | Python imports of the module, JS imports of the file, manifest entries | file card (module, record counts) | — |
+| pysym (Python or JS symbol) | the definition | name-based references in its file and in importing files (JS: named / renamed / default / namespace imports and `export … from` re-exports, under each importer's local name) | signature + docstring (JS: declaration, JSDoc, `@module/path`) | Python subclasses / overrides |
 
 Result ordering is meaningful (Claude reads the first entries first): the
 "most informative" location comes first. Results are capped (definitions 50,
-implementations 100, references 300 (time box 2.2 s), workspace symbols 150;
-outlines and workspace answers stop at ~40k rendered characters, at most 2000
-XML/CSV records built) with a final marker counting what was left out. A single
-result is returned as a lone
+implementations 100, references 300 or 100 for Python / JS symbols and files
+(time box 2.2 s), workspace symbols 150; outlines and workspace answers stop at
+~40k rendered characters, at most 2000 XML/CSV records built). Workspace symbol
+answers and outlines end with a final marker saying what was left out;
+location lists are cut silently. A single result is returned as a lone
 `Location` (Claude Code's gitignore filter only applies to arrays).
+
+findReferences and incomingCalls share two rules. A use on a receiver whose
+model is not inferred counts only when the name is not a framework (BaseModel)
+member and exactly one model defines it (`navigation.MAX_UNKNOWN_RECEIVER_MODELS`).
+Python files Odoo never loads (`migrations/`, `upgrades/`, `upgrade/`,
+`static/`) are scanned but ranked last. incomingCalls also lists cron / server
+action `code` callers (under the record's xml id, detail `cron code` /
+`server action code`) and field arguments naming the method (`compute=`,
+`compute_sql=`...); prepareCallHierarchy marks an item built on an uninferred
+receiver `receiver not inferred (candidates: ...)`.
 
 ### Cursor leniency
 Claude's columns are approximate. When the exact column is not on a meaningful
@@ -158,9 +181,10 @@ has no Odoo meaning gets no result rather than a neighbour's (`super` in
 
 ## 6. Python analysis & inference (analysis/python.py)
 
-Per request: parse the file (cached by document version/mtime), find the node at
-the cursor, classify, infer receiver types. Types: `RS(model)` recordset,
-`ENV`, `PYMOD(dotted)`, `PYCLS(path, name)`, `PYINST(path, name)`, unknown.
+Per request: parse the file (32-entry LRU keyed by
+`(path, len(source), hash(source))`), find the node at the cursor, classify,
+infer receiver types. Types: `RS(model)` recordset, `ENV`, `PYMOD(dotted)`,
+`PYCLS(path, name)`, `PYINST(path, name)`, unknown.
 
 * `self` in a model method → `RS(current model)`; `cls` in classmethods.
 * `self.env` / `request.env` / `x.env` → `ENV`; `ENV['x']` → `RS('x')`;
@@ -212,19 +236,28 @@ matched against refs/records of the current file's facts. View field refs carry
 `(record index, subpath)`: the model is `view_model(record)` (follows
 `inherit_id`) walked through the x2many fields of `subpath`. For inherited views
 using `xpath`, the subpath is derived from `field[@name='x']` steps of the expr.
+When the view model stays unknown, an arch ref falls back to the models defining
+the name, like an unknown Python receiver: none for BaseModel members and magic
+fields; one → used, flagged `extra["guess"]`; ≤ 8 → ambiguous target; more →
+nothing.
 
 ## 8. Diagnostics policy (features/diagnostics.py)
 
 Precision first: Odoo's own source must produce (almost) **zero** diagnostics;
-this is enforced by sweeping whole checkouts in tests. Report only when the
-env is complete enough to be sure (the referenced module is part of the env).
+tests enforce it on a fixed set of core modules per version
+(`tests/test_diagnostics.py`, `RealTreeCase.clean_modules`), and
+`scripts/sweep_diagnostics.py` measures it on whole checkouts. Report only
+when the env is complete enough to be sure (the referenced module is part of
+the env).
 
 Codes: `syntax-error`, `unknown-model`, `unknown-field`, `unknown-method`,
-`unknown-xmlid`, `missing-dependency` (defined only in modules outside the
-dependency closure), `unknown-module` and `missing-file` (manifest),
-`deprecated-attrs` (17.0+ `attrs`/`states` in views), `deprecated-tree` (18.0+
-`<tree>`), `deprecated` (Python API removed/ignored in the target version:
-`name_get`, `_sql_constraints`, field `states=`, `group_operator=`,
+`private-method` (warning: a button calling a `_`-prefixed method, which Odoo
+refuses to call from buttons), `unknown-xmlid`, `missing-dependency` (defined
+only in modules outside the dependency closure), `unknown-module` and
+`missing-file` (manifest), `deprecated-attrs` (17.0+ `attrs`/`states` in views),
+`deprecated-tree` (18.0+ `<tree>`), `unknown-view-type` (`<list>` view or
+`list` xpath before 18.0), `deprecated` (Python API removed/ignored in the
+target version: `name_get`, `_sql_constraints`, field `states=`, `group_operator=`,
 `user_has_groups`...), `invalid-default` (`default='_method'` string),
 `not-imported` (a Python file defining models that no import from the module's
 `__init__.py` reaches; says when the import is commented out), `not-loaded` (a
@@ -302,12 +335,14 @@ Index: per category, entries grouped by lowercase name, searched by bisect
 Categories are fed per file in families (model classes from the registry,
 XML/CSV records, Python symbols, JS symbols) built on first use, then updated
 only for the files whose facts changed when `registry.generation` moves (every
-didOpen / didChange bumps it); a full registry rebuild (a file becoming
-(un)reachable from its module's `__init__.py`) or a manifest change (data load
-order) starts over. Routes are parsed from the decorator source (facts keep
-literal paths only, not `type=` / `auth=`) once per file content. Stored in
-`registry.__dict__`, referencing the registry weakly so evicted registries are
-freed.
+registry update bumps it: an open document whose text differs from the indexed
+disk content, a stat-sweep change, a new module; a didOpen of an indexed file
+whose text matches the disk bumps nothing); a full registry rebuild (a file
+becoming (un)reachable from its module's `__init__.py`) or a manifest change
+(data load order) starts over. Routes are parsed from the decorator source
+(facts keep literal paths only, not `type=` / `auth=`) once per file content.
+Stored in `registry.__dict__`, referencing the registry weakly so evicted
+registries are freed.
 
 ## 10. Performance budgets
 
@@ -335,10 +370,13 @@ UTF-16 conversion.
 
 * `tests/fixtures/mini/` – a tiny synthetic Odoo (framework + base + a few
   addons) for fast deterministic unit tests.
-* Real-tree tests (skipped when `~/odev/worktrees/<ver>` is absent): golden
-  definitions per version; *coverage sweeps* (`scripts/coverage_python.py`:
-  share of record-attribute accesses that resolve); *precision sweeps*
-  (`scripts/sweep_diagnostics.py`: diagnostics on whole checkouts must stay ~0).
+* Real-tree tests (skipped when `<worktrees>/<ver>` is absent; `<worktrees>` =
+  `$ODOO_LENS_WORKTREES`, default `~/odev/worktrees`): golden definitions per
+  version; a fixed set of core modules must stay diagnostic-free.
+* Manual sweeps (scripts, not run by the tests): *coverage*
+  (`scripts/coverage_python.py`: share of record-attribute accesses that
+  resolve); *precision* (`scripts/sweep_diagnostics.py`: diagnostics on whole
+  checkouts must stay ~0).
 * End-to-end: `tests/lsp_client.py` drives `bin/odoo-lens` over stdio with
   Claude Code's exact initialize capabilities and sync behaviour
   (`tests/test_e2e.py`); `scripts/bench.py` measures per-operation latency.

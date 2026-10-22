@@ -9,7 +9,7 @@ server) or [OdooLS](https://github.com/odoo/odoo-ls) (Odoo's official language s
 It understands Odoo rather than just Python: model composition (`_name` / `_inherit` / `_inherits` /
 mixins / `base`), module dependency order, merged field definitions, override chains, magic fields,
 XML ids (including implicit `model_*` / `field_*`), view archs and x2many sub-views, QWeb and owl
-templates, security CSVs (`ir.model.access.csv` and Odoo 20's `ir.access.csv`), manifests and JS
+templates, security CSVs (`ir.model.access.csv` and saas-19.4+ `ir.access.csv`), manifests and JS
 `@module/...` imports.
 
 | Operation | What you get |
@@ -17,16 +17,18 @@ templates, security CSVs (`ir.model.access.csv` and Odoo 20's `ir.access.csv`), 
 | goToDefinition | model → defining class then extensions (load order); field → original declaration then overrides; `super().x()` → next implementation; XML ids, templates, modules, files, imports |
 | hover | field type/comodel/merged attributes/all definitions with source; method signature, decorators, override chain (and the call order with every overriding module installed); model summary; module load order; record/view/action details; inferred type of a variable |
 | goToImplementation | every override of a method / extension of a model / view inheriting a view, across all modules |
-| findReferences | usages across Python (typed receivers), XML views and data, CSV access rules, JS `orm.call` |
+| findReferences | usages across Python (typed receivers), XML views and data, CSV access rules, JS `orm.call` and imports |
 | documentSymbol | outline with Odoo details (model, field types, decorators) |
 | workspaceSymbol | `sale.order`, `sale.order.partner_id`, `sale.order.`, `action_confirm`, `sale.view_order_form`, `view:sale.order`, `/shop/cart`, `model:`/`field:`/`xmlid:`… |
-| call hierarchy | callers / callees of a method (Python calls, XML buttons, compute links) |
-| diagnostics | unknown model/field/method/xml id, missing module dependency, missing data file, syntax removed in the target version (`attrs`/`states` 17+, `<tree>` 18+, `_sql_constraints` 19+…) |
+| call hierarchy | callers / callees of a method (Python calls, XML buttons, cron / server action code, compute links) |
+| diagnostics | unknown model/field/method/xml id, missing module dependency, missing data file, buttons calling `_private` methods, syntax removed in the target version (`attrs`/`states` 17+, `<tree>` 18+, `_sql_constraints` 19+…) or not yet in it (`<list>` before 18.0) |
 
 ## Requirements
 
-- Python ≥ 3.12 on `PATH` (`python3.12`, `python3.13`, `python3.14` or `python3`; override with
-  `ODOO_LENS_PYTHON`). Odoo saas-19.1+ sources use Python 3.12 syntax, so 3.12+ is needed to index them.
+- Python ≥ 3.12 (`python3.12` … `python3.15` or `python3` on `PATH` or in well-known install locations).
+  Odoo saas-19.1+ sources use Python 3.12 syntax, so 3.12+ is needed to index them; without one the
+  launcher falls back to Python ≥ 3.10 with a warning. `ODOO_LENS_PYTHON=/path/to/python` (≥ 3.10, same warning
+  below 3.12) is used as is, without probing; the launcher stops with an error when it is missing or older than 3.10.
 - No third-party packages.
 
 ## Install in Claude Code
@@ -64,7 +66,8 @@ session hint prints the exact path) in `permissions.allow` (in `claude -p` runs 
 the LSP tool).
 
 Diagnostics are pushed for files Claude edits and for customer modules (any addons root that is not
-Odoo's own `odoo`/`enterprise`/`design-themes` sources), never for core files merely opened by
+one of Odoo's own repositories: `odoo`, `enterprise`, `design-themes`, `themes`, `industry`, `upgrade`,
+`upgrade-util`), never for core files merely opened by
 navigation. Disable them per project with `{"diagnostics": false}` in `.odoo-lens.json`.
 
 ## How Odoo sources are found
@@ -89,8 +92,8 @@ against its own version, indexed on first use.
 
 ## Performance
 
-The index is built in a process pool and cached per addons root in `~/.cache/odoo-lens`
-(`ODOO_LENS_CACHE_DIR`), validated by file mtime/size and shared between projects using the same
+The index is built in a process pool and cached per addons root in `$ODOO_LENS_CACHE_DIR`, else
+`$XDG_CACHE_HOME/odoo-lens` (default `~/.cache/odoo-lens`), validated by file mtime/size and shared between projects using the same
 sources. Odoo 20.0 community + enterprise (≈40k files, 1.6k modules): cold index ≈ 4–5 s,
 warm start ≈ 1 s, ≈ 470 MB RSS after indexing (≈ 700 MB after heavy use). Open files are re-checked on every request and all indexed files
 every 30 s, so edits made outside the editor (git, scripts) are picked up.
@@ -100,9 +103,10 @@ every 30 s, so edits made outside the editor (git, scripts) are picked up.
 ```bash
 bin/odoo-lens env <path>                        # detected environment
 bin/odoo-lens index <path>                      # build/load the index, timings
-bin/odoo-lens query hover <file> <line> <col>   # definition|references|implementation|typedef|symbols|calls-in|calls-out
-bin/odoo-lens symbols "sale.order." --path <dir>
-bin/odoo-lens check <module_dir>                # diagnostics as a linter (exit 1 on errors)
+bin/odoo-lens query hover <file> <line> <col>   # definition|references|hover|implementation|typedef|symbols|calls-in|calls-out|targets (raw cursor analysis, for debugging)
+bin/odoo-lens symbols "sale.order." --path <dir> # the whole server-capped answer; --limit N cuts it
+bin/odoo-lens check <module_dir>                # diagnostics as a linter (exit 1 on errors); files, modules or a whole
+                                                # addons folder, each file checked against its own Odoo env
 ```
 
 Logs: `claude --debug` shows the server's stderr; `ODOO_LENS_LOG=/tmp/odoo-lens.log`,

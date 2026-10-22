@@ -14,13 +14,13 @@ Every operation takes `filePath`, `line`, `character` (1-based). Aim at the toke
 Run the linter on the module first — one command, exact file:line answers, no false alarms on Odoo's own code:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/bin/odoo-lens check <module_dir>     # or the whole custom addons folder
+${CLAUDE_PLUGIN_ROOT}/bin/odoo-lens check <module_dir>     # or the whole custom addons folder (each file uses its own Odoo version)
 ```
 
 It reports unknown models / fields / methods / xml ids for the module's Odoo version (with renames and "did you mean"),
-missing `depends`, files never imported (commented-out imports included), and syntax removed in that version
-(`attrs`/`states` 17+, `<tree>` 18+, `_sql_constraints` 19+...). Then use the LSP operations below to understand the
-code involved.
+missing `depends`, files never imported (commented-out imports included), buttons calling `_private` methods, and syntax
+removed in that version (`attrs`/`states` 17+, `<tree>` 18+, `_sql_constraints` 19+...) or not yet in it (`<list>` before 18.0).
+Then use the LSP operations below to understand the code involved.
 
 ## Which operation
 
@@ -29,11 +29,11 @@ code involved.
 | Where is model / field / method / xml id defined? | `workspaceSymbol` with a query (below). It searches the Odoo environment of the file given as `filePath` (line 1, character 1): pass any file of the right project/version. |
 | What is this? Type, comodel, merged attributes, every definition and override, docstring | `hover` — the richest answer, often enough on its own |
 | Jump to definition(s) | `goToDefinition` — original declaration first, then overrides in module load order; on `super().x()` the next implementation |
-| All overrides of a method, all extensions of a model, views inheriting a view | `goToImplementation` (in module load order) |
+| All overrides of a method, all extensions of a model, views inheriting a view | `goToImplementation` (the model's own classes in load order, then inheriting models; for a method, then the inherited implementations most-derived first, i.e. super() order) |
 | In which order do overrides run / does `super()` chain? | `hover` on the method: the chain seen from this module, plus the call order with every overriding module installed (Odoo's real load order: dependency depth, then name) — no need to compute module depths yourself |
-| Every usage (Python, XML views and data, CSV access rules, JS `orm.call`) | `findReferences` |
+| Every usage (Python, XML views and data, CSV access rules, JS `orm.call` and imports) | `findReferences` |
 | Outline of a big file with Odoo details (model, field types, decorators) | `documentSymbol` |
-| Who calls a method / what it calls | `incomingCalls` / `outgoingCalls` |
+| Who calls a method (Python, buttons, cron / server action code, `compute=`...) / what it calls | `incomingCalls` / `outgoingCalls` |
 
 ## workspaceSymbol queries
 
